@@ -201,6 +201,7 @@ Medium模型完整训练步骤的各阶段耗时之和为：
 
 \subsection{nsys性能分析}
 % 正文里直接用
+一个示例的nsys命令如下，我真正运行的命令放在\texttt{run\_all\_nsys.sh}里，方便批量运行。
 \begin{lstlisting}[language=bash]
 nsys profile \
   --trace=cuda,nvtx,cudnn,cublas,osrt \
@@ -233,8 +234,11 @@ How  many times is this kernel invoked during a single forward pass of your mode
 Is it the same kernel that takes the most runtime when you do both forward and backward passes? 
 (Hint: look at the “CUDA GPU Kernel Summary” under “Stats System View”, and filter using NVTX ranges to identify which parts of the model are responsible for which kernels.)
 
-对nvtx.my_forward的time line应用filter，然后看看它的kernal summary，发现是Time	Total Time	Instances	Avg	Med	Min	Max	StdDev	Name
-69.7%	7.238 ms	85	85.155 μs	42.240 μs	41.440 μs	417.565 μs	58.238 μs	ampere_sgemm_128x64_tn
+对nvtx.my\_forward的time line应用filter，然后看看它的kernal summary，发现是\texttt{ampere\_sgemm\_128x64\_tn}，总用时7.238 ms
+调用次数85，时间占比69.8\%——为啥这里一个forward用时55ms，而kernal的总用时只有10ms左右呢？
+——猜测大概是nsys的profiler开销（尤其是追踪pytorch函数的），加上cpu调用api和dispatch kernel的开销，导致总时间比kernel的时间多了很多。
+因为nsys只是统计kernal在gpu上跑的时间。
+
 
 
 

@@ -15,7 +15,7 @@ WARMUP_STEPS=5
 MEASUREMENT_STEPS=10
 
 TRACE_FLAGS="cuda,nvtx,cudnn,cublas,osrt"
-PYTORCH_FLAGS="functions-trace,autograd-shapes-nvtx"
+# PYTORCH_FLAGS="functions-trace,autograd-shapes-nvtx"
 
 echo "Nsight Systems profiling started."
 echo "Models: ${MODEL_SIZES[*]}"
@@ -36,7 +36,6 @@ for model in "${MODEL_SIZES[@]}"; do
 
     nsys profile \
       --trace="${TRACE_FLAGS}" \
-      --pytorch="${PYTORCH_FLAGS}" \
       --sample=none \
       --cpuctxsw=none \
       --output="reports/${name}" \
