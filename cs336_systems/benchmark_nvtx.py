@@ -54,15 +54,14 @@ MODEL_CONFIGS = {
 def run_step(
     mode: str,
     measure: bool = False,
-    annotate: bool = False,     # 是否开启nvtx标记
+    annotate: bool = False,     # 是否开启 nvtx 标记
 ):
     timings = {}
 
-    # annotate=False 时相当于普通的空上下文
     step_ctx = nvtx.range("my_train_step") if annotate else nullcontext()
 
     with step_ctx:
-        # 清空梯度
+        # ---------------- Zero grad ----------------
         zero_grad_ctx = (
             nvtx.range("my_zero_grad")
             if annotate
@@ -86,8 +85,11 @@ def run_step(
         with forward_ctx:
             logits = model(inputs)
 
+            # 让 my_forward 包含 GPU forward kernels 完成时间
+            if measure:
+                torch.cuda.synchronize()
+
         if measure:
-            torch.cuda.synchronize()
             timings["forward"] = timeit.default_timer() - start
 
         if mode == "forward":
@@ -106,6 +108,10 @@ def run_step(
                 targets.reshape(-1),
             )
 
+            # 如果你想让 my_cross_loss 的 range 更准确，可以保留
+            if measure:
+                torch.cuda.synchronize()
+
         # ---------------- Backward ----------------
         if measure:
             torch.cuda.synchronize()
@@ -120,8 +126,11 @@ def run_step(
         with backward_ctx:
             loss.backward()
 
+            # 让 my_backward 包含 GPU backward kernels 完成时间
+            if measure:
+                torch.cuda.synchronize()
+
         if measure:
-            torch.cuda.synchronize()
             timings["backward"] = timeit.default_timer() - start
 
         if mode == "forward_backward":
@@ -141,8 +150,11 @@ def run_step(
         with optimizer_ctx:
             optimizer.step()
 
+            # 让 my_optimizer_step 包含 GPU optimizer kernels 完成时间
+            if measure:
+                torch.cuda.synchronize()
+
         if measure:
-            torch.cuda.synchronize()
             timings["optimizer"] = timeit.default_timer() - start
 
     return timings

@@ -225,5 +225,17 @@ nsys profile \
 对于small模型，使用python标准库测量的三种context length前向传播时间分别为：60.130 ± 2.800 ms、60.141 ± 1.905 ms、74.061 ± 0.309 ms
 差不太多。原因是？
 
+使用nsys的平均时间是：56.996ms+-3.566ms、56.139ms+-1.673ms、55.684ms+-1.435ms；
+会比用python那边统计的少那么5ms左右，我猜测是nsys是直接统计的kernal时间所以没有一些通信或者框架的开销？
+
+(b) What CUDA kernel takes the most cumulative GPU time during the forward pass? 
+How  many times is this kernel invoked during a single forward pass of your model? 
+Is it the same kernel that takes the most runtime when you do both forward and backward passes? 
+(Hint: look at the “CUDA GPU Kernel Summary” under “Stats System View”, and filter using NVTX ranges to identify which parts of the model are responsible for which kernels.)
+
+对nvtx.my_forward的time line应用filter，然后看看它的kernal summary，发现是Time	Total Time	Instances	Avg	Med	Min	Max	StdDev	Name
+69.7%	7.238 ms	85	85.155 μs	42.240 μs	41.440 μs	417.565 μs	58.238 μs	ampere_sgemm_128x64_tn
+
+
 
 \end{document}
