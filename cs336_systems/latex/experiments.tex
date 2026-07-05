@@ -1,0 +1,229 @@
+% !TeX program = xelatex
+\documentclass[12pt]{ctexart}
+
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{geometry}
+
+\usepackage{listings}
+
+
+
+
+\geometry{a4paper, margin=2.5cm}
+
+\title{CS336 Assignment 2 实验报告}
+\author{linyun}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Benchmarking Script}
+
+\subsection{实验设置}
+
+本实验使用 NVIDIA GeForce RTX 4090，对 small 模型的一次完整训练步骤进行性能测试。实验配置为 batch size 4、context length 512，首先执行5次预热，随后进行10次正式测量。
+
+\subsection{带warm-up实验结果}
+
+实验在一张 NVIDIA GeForce RTX 4090（24GB显存）上进行。各模型的测量结果如表~\ref{tab:benchmark-results} 所示，其中 ``--'' 表示由于显存不足而未能获得结果。
+
+\begin{table}[htbp]
+    \centering
+    \caption{不同规模模型的性能测试结果}
+    \label{tab:benchmark-results}
+    \begin{tabular}{lrrrl}
+        \toprule
+        模型 &
+        Forward（ms） &
+        Backward（ms） &
+        Optimizer（ms） &
+        运行状态 \\
+        \midrule
+        Small
+        & $24.451 \pm 0.238$
+        & $54.034 \pm 0.244$
+        & $12.308 \pm 0.114$
+        & Full step成功 \\
+
+        Medium
+        & $74.276 \pm 0.264$
+        & $154.364 \pm 0.432$
+        & $39.441 \pm 0.229$
+        & Full step成功 \\
+
+        Large
+        & $168.974 \pm 0.162$
+        & $339.278 \pm 0.465$
+        & --
+        & Full step OOM \\
+
+        XL
+        & --
+        & --
+        & --
+        & OOM \\
+
+        10B
+        & --
+        & --
+        & --
+        & OOM \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+
+但是，Large模型在运行包含AdamW更新的完整训练步骤时发生显存不足，因此未能获得优化器更新时间。
+
+xl和10B模型在当前硬件配置下无法完成前向传播，直接发生显存不足。
+
+该结果表明，随着模型规模增长，参数、梯度、激活值及优化器状态的显存开销会迅速超过单卡容量，后续需要通过混合精度、激活检查点或参数分片等方法降低显存占用。
+
+对于成功完成的测量，各阶段标准差均明显小于平均值，说明经过5次预热后，运行时间较为稳定。
+反向传播始终是耗时最高的阶段，其耗时约为前向传播的两倍。优化器耗时是三个阶段最少的。
+
+一次完整训练步骤的各阶段耗时之和约为：
+
+\[
+24.451 + 54.034 + 12.308 = 90.793\ \text{ms}.
+\]
+
+反向传播耗时约为前向传播的2.21倍，是完整训练步骤中耗时最高的阶段。三项测量的标准差均远小于平均值，相对波动均低于1\%，说明经过5次预热后运行时间较为稳定。
+
+\subsection{改变 Warm-up 次数的实验结果}
+
+\subsubsection{Warm-up = 0}
+
+在不进行预热的情况下，各模型的测量结果如表~\ref{tab:warmup-zero} 所示。实验配置保持为 batch size 4、context length 512，并正式测量10次。
+
+\begin{table}[htbp]
+    \centering
+    \caption{不进行预热时的性能测试结果}
+    \label{tab:warmup-zero}
+    \begin{tabular}{lrrr}
+        \toprule
+        模型 &
+        Forward（ms） &
+        Backward（ms） &
+        Optimizer（ms） \\
+        \midrule
+        Small
+        & $53.807 \pm 87.837$
+        & $67.246 \pm 38.523$
+        & $17.321 \pm 14.372$ \\
+
+        Medium
+        & $125.609 \pm 153.896$
+        & $167.544 \pm 40.169$
+        & $43.418 \pm 11.581$ \\
+
+        Large
+        & $197.071 \pm 84.114$
+        & $350.336 \pm 33.491$
+        & -- \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+与5次预热的结果相比，未预热时各阶段的平均耗时普遍更高，标准差也显著增大。其中Small和Medium模型的Forward标准差甚至超过了平均值，说明10次测量中存在耗时特别高的初始迭代。
+
+这是因为第一次运行可能包含CUDA上下文和动态库初始化、GPU显存首次分配、内核加载以及AdamW状态创建等一次性开销。随着模型重复运行，这些初始化工作不再出现，因此后续迭代明显更快，最终造成较大的测量波动。
+
+\subsubsection{Warm-up = 1}
+
+执行1次预热后的完整训练步骤结果如表~\ref{tab:warmup-one} 所示。实验配置保持为 batch size 4、context length 512，并正式测量10次。
+
+\begin{table}[htbp]
+    \centering
+    \caption{执行1次预热时的完整训练步骤性能}
+    \label{tab:warmup-one}
+    \begin{tabular}{lrrr}
+        \toprule
+        模型 &
+        Forward（ms） &
+        Backward（ms） &
+        Optimizer（ms） \\
+        \midrule
+        Small
+        & $24.930 \pm 1.568$
+        & $55.247 \pm 1.691$
+        & $12.596 \pm 0.268$ \\
+
+        Medium
+        & $74.251 \pm 0.254$
+        & $154.445 \pm 0.712$
+        & $39.613 \pm 0.383$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Small模型完整训练步骤的各阶段耗时之和为：
+
+\[
+24.930 + 55.247 + 12.596
+= 92.773\ \text{ms}.
+\]
+
+Medium模型完整训练步骤的各阶段耗时之和为：
+
+\[
+74.251 + 154.445 + 39.613
+= 268.309\ \text{ms}.
+\]
+
+另外，在Medium模型上使用仅包含前向和反向传播的模式进行了一次对照实验，结果如表~\ref{tab:warmup-one-mode-comparison} 所示。
+
+\begin{table}[htbp]
+    \centering
+    \caption{Medium模型在不同运行模式下的耗时比较}
+    \label{tab:warmup-one-mode-comparison}
+    \begin{tabular}{lrr}
+        \toprule
+        运行模式 & Forward（ms） & Backward（ms） \\
+        \midrule
+        Full step
+        & $74.251 \pm 0.254$
+        & $154.445 \pm 0.712$ \\
+
+        Forward + backward
+        & $74.617 \pm 0.300$
+        & $154.633 \pm 0.517$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+不进行预热时，测量结果的平均值和标准差都明显增大，例如Small模型的Forward由5次预热后的 \(24.451\pm0.238\) ms 变为 \(53.807\pm87.837\) ms，说明初始迭代包含CUDA初始化、显存分配、内核加载和AdamW状态创建等一次性开销。
+行1次预热后，大部分一次性开销已经被排除，结果接近5次预热，但Small模型的波动仍然更大。1～2次预热可能仍不足以让GPU频率、缓存、内存分配器和各类延迟初始化完全稳定，因此使用5次预热能得到更加可靠的稳态性能结果。
+
+
+\subsection{nsys性能分析}
+% 正文里直接用
+\begin{lstlisting}[language=bash]
+nsys profile \
+  --trace=cuda,nvtx,cudnn,cublas,osrt \
+  --pytorch=functions-trace,autograd-shapes-nvtx \
+  --sample=none \
+  --cpuctxsw=none \
+  --output=report_nvtx \
+  --force-overwrite=true \
+  -- python benchmark_nvtx.py \
+  --model-size small \
+  --context-length 512 \
+  --mode full_step \
+  --warmup-steps 5 \
+  --measurement-steps 10
+\end{lstlisting}
+
+--sample=none 是关闭 CPU IP/backtrace sampling；
+--cpuctxsw=none 是关闭线程上下文切换采集；
+
+\subsubsection{实验结果分析}
+(a) What is the total time spent on your forward pass? Does it match what we had measured  before with the Python standard library?
+对于small模型，使用python标准库测量的三种context length前向传播时间分别为：60.130 ± 2.800 ms、60.141 ± 1.905 ms、74.061 ± 0.309 ms
+差不太多。原因是？
+
+
+\end{document}
