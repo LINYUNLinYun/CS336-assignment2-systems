@@ -8,7 +8,7 @@ MODEL_SIZES=("small" "medium")
 
 # 你可以在这里改 context length
 # 作业要求：大于 128，并且是 2 的幂
-CONTEXT_LENGTHS=(256)
+CONTEXT_LENGTHS=(256 512 1024)
 
 MODE="full_step"
 WARMUP_STEPS=5
@@ -41,7 +41,7 @@ for model in "${MODEL_SIZES[@]}"; do
       --cpuctxsw=none \
       --output="reports/${name}" \
       --force-overwrite=true \
-      -- python benchmark.py \
+      -- python benchmark_nvtx.py \
       --model-size "${model}" \
       --context-length "${ctx}" \
       --mode "${MODE}" \
