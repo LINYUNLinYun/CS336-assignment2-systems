@@ -4,11 +4,7 @@
 \usepackage{amsmath}
 \usepackage{booktabs}
 \usepackage{geometry}
-
 \usepackage{listings}
-
-
-
 
 \geometry{a4paper, margin=2.5cm}
 
@@ -24,49 +20,56 @@
 
 \subsection{实验设置}
 
-本实验使用 NVIDIA GeForce RTX 4090，对 small 模型的一次完整训练步骤进行性能测试。实验配置为 batch size 4、context length 512，首先执行5次预热，随后进行10次正式测量。
+本实验使用 NVIDIA GeForce RTX 4090，对 small 和 medium 模型在不同 context length 下的一次完整训练步骤进行性能测试。实验配置为 batch size 4，首先执行5次预热，随后进行10次正式测量。
 
 \subsection{带warm-up实验结果}
 
-实验在一张 NVIDIA GeForce RTX 4090（24GB显存）上进行。各模型的测量结果如表~\ref{tab:benchmark-results} 所示，其中 ``--'' 表示由于显存不足而未能获得结果。
+实验在一张 NVIDIA GeForce RTX 4090（24GB显存）上进行。模型使用 batch size 4，首先执行5次预热，随后进行10次正式测量。测量结果如表~\ref{tab:benchmark-results} 所示，其中 ``--'' 表示由于显存不足而未能获得结果。
 
 \begin{table}[htbp]
     \centering
-    \caption{不同规模模型的性能测试结果}
+    \caption{不同模型规模和上下文长度下的性能测试结果}
     \label{tab:benchmark-results}
-    \begin{tabular}{lrrrl}
+    \begin{tabular}{llrrrl}
         \toprule
         模型 &
+        Context length &
         Forward（ms） &
         Backward（ms） &
         Optimizer（ms） &
         运行状态 \\
         \midrule
-        Small
-        & $24.451 \pm 0.238$
-        & $54.034 \pm 0.244$
-        & $12.308 \pm 0.114$
-        & Full step成功 \\
+        Small & 256
+        & $28.841 \pm 0.483$
+        & $56.182 \pm 2.504$
+        & $13.002 \pm 0.360$
+        & 成功 \\
 
-        Medium
-        & $74.276 \pm 0.264$
-        & $154.364 \pm 0.432$
-        & $39.441 \pm 0.229$
-        & Full step成功 \\
+        Small & 512
+        & $28.189 \pm 0.926$
+        & $55.628 \pm 1.992$
+        & $12.797 \pm 0.285$
+        & 成功 \\
 
-        Large
-        & $168.974 \pm 0.162$
-        & $339.278 \pm 0.465$
-        & --
-        & Full step OOM \\
+        Small & 1024
+        & $72.593 \pm 0.229$
+        & $150.140 \pm 0.151$
+        & $12.867 \pm 0.164$
+        & 成功 \\
 
-        XL
-        & --
-        & --
-        & --
-        & OOM \\
+        Medium & 256
+        & $57.477 \pm 0.744$
+        & $109.311 \pm 3.473$
+        & $40.147 \pm 0.380$
+        & 成功 \\
 
-        10B
+        Medium & 512
+        & $75.015 \pm 0.336$
+        & $155.394 \pm 0.389$
+        & $39.880 \pm 0.359$
+        & 成功 \\
+
+        Medium & 1024
         & --
         & --
         & --
@@ -75,23 +78,13 @@
     \end{tabular}
 \end{table}
 
+在当前单卡 RTX 4090 24GB 显存限制下，small 模型能够运行到 context length 1024，而 medium 模型在 context length 1024 时发生显存不足，因此 medium 模型最大成功运行的上下文长度为512。由于作业要求选择大于128的2的幂次上下文长度，并尽量选择显存能容纳的最大长度，因此本文报告 small 模型的 256、512、1024 三组结果，以及 medium 模型的 256、512 两组成功结果，并将 medium context length 1024 记为 OOM。
 
-但是，Large模型在运行包含AdamW更新的完整训练步骤时发生显存不足，因此未能获得优化器更新时间。
+从结果可以看到，反向传播始终是耗时最高的阶段，通常约为前向传播的两倍左右。这是因为反向传播不仅需要计算梯度，还需要沿计算图反向执行大量矩阵乘法和逐元素操作。Optimizer 阶段的耗时主要与模型参数量有关，因此在同一模型规模下，context length 从256增加到1024时，small 模型的 optimizer 时间基本保持在约13 ms；medium 模型的 optimizer 时间也基本保持在约40 ms。
 
-xl和10B模型在当前硬件配置下无法完成前向传播，直接发生显存不足。
+对于 small 模型，context length 从256增加到512时，forward 和 backward 时间变化不大；但增加到1024时，forward 从约28 ms 增加到约73 ms，backward 从约56 ms 增加到约150 ms。这说明在较短序列长度下，GPU kernel launch、调度开销和 GPU 利用率等因素可能掩盖序列长度增长带来的开销；而当 context length 增加到1024后，attention 中与序列长度平方相关的计算和显存访问开销开始明显体现出来。
 
-该结果表明，随着模型规模增长，参数、梯度、激活值及优化器状态的显存开销会迅速超过单卡容量，后续需要通过混合精度、激活检查点或参数分片等方法降低显存占用。
-
-对于成功完成的测量，各阶段标准差均明显小于平均值，说明经过5次预热后，运行时间较为稳定。
-反向传播始终是耗时最高的阶段，其耗时约为前向传播的两倍。优化器耗时是三个阶段最少的。
-
-一次完整训练步骤的各阶段耗时之和约为：
-
-\[
-24.451 + 54.034 + 12.308 = 90.793\ \text{ms}.
-\]
-
-反向传播耗时约为前向传播的2.21倍，是完整训练步骤中耗时最高的阶段。三项测量的标准差均远小于平均值，相对波动均低于1\%，说明经过5次预热后运行时间较为稳定。
+对于 medium 模型，context length 从256增加到512时，forward 从约57 ms 增加到约75 ms，backward 从约109 ms 增加到约155 ms，增长趋势更加明显。整体来看，模型规模和上下文长度都会显著影响训练速度，而显存限制会很快成为更大模型和更长上下文训练的主要瓶颈。
 
 \subsection{改变 Warm-up 次数的实验结果}
 
@@ -195,20 +188,20 @@ Medium模型完整训练步骤的各阶段耗时之和为：
     \end{tabular}
 \end{table}
 
-不进行预热时，测量结果的平均值和标准差都明显增大，例如Small模型的Forward由5次预热后的 \(24.451\pm0.238\) ms 变为 \(53.807\pm87.837\) ms，说明初始迭代包含CUDA初始化、显存分配、内核加载和AdamW状态创建等一次性开销。
-行1次预热后，大部分一次性开销已经被排除，结果接近5次预热，但Small模型的波动仍然更大。1～2次预热可能仍不足以让GPU频率、缓存、内存分配器和各类延迟初始化完全稳定，因此使用5次预热能得到更加可靠的稳态性能结果。
-
+不进行预热时，测量结果的平均值和标准差都明显增大，例如Small模型的Forward由5次预热后的稳定结果变为 $53.807\pm87.837$ ms，说明初始迭代包含CUDA初始化、显存分配、内核加载和AdamW状态创建等一次性开销。执行1次预热后，大部分一次性开销已经被排除，结果接近5次预热，但Small模型的波动仍然更大。1～2次预热可能仍不足以让GPU频率、缓存、内存分配器和各类延迟初始化完全稳定，因此使用5次预热能得到更加可靠的稳态性能结果。
 
 \subsection{nsys性能分析}
-% 正文里直接用
-一个示例的nsys命令如下，我真正运行的命令放在\texttt{run\_all\_nsys.sh}里，方便批量运行。
+
+为了进一步分析模型前向传播、反向传播和优化器更新中具体的 CUDA kernel 开销，我使用 NVIDIA Nsight Systems 进行 profile。由于已经在代码中手动添加了 NVTX 标记，因此本实验没有启用 PyTorch 自动函数级 trace，以避免大量额外 trace 事件带来的 profiler 开销。
+
+一个示例的 nsys 命令如下，实际批量运行命令放在 \texttt{run\_all\_nsys.sh} 中。
+
 \begin{lstlisting}[language=bash]
 nsys profile \
   --trace=cuda,nvtx,cudnn,cublas,osrt \
-  --pytorch=functions-trace,autograd-shapes-nvtx \
   --sample=none \
   --cpuctxsw=none \
-  --output=report_nvtx \
+  --output=reports/small_ctx512_full_step_light \
   --force-overwrite=true \
   -- python benchmark_nvtx.py \
   --model-size small \
@@ -218,28 +211,92 @@ nsys profile \
   --measurement-steps 10
 \end{lstlisting}
 
---sample=none 是关闭 CPU IP/backtrace sampling；
---cpuctxsw=none 是关闭线程上下文切换采集；
+其中，\texttt{--trace=cuda,nvtx,cudnn,cublas,osrt} 表示采集 CUDA、NVTX、cuDNN、cuBLAS 以及操作系统运行库相关事件。\texttt{--sample=none} 用于关闭 CPU IP/backtrace sampling，\texttt{--cpuctxsw=none} 用于关闭线程上下文切换采集。这样可以避免在当前服务器环境中由于权限限制产生 CPU 采样错误，同时也能减少 profiler 的额外开销。
+
+在 benchmark 代码中，我手动添加了如下 NVTX 区间：
+
+\begin{itemize}
+    \item \texttt{my\_train\_step}：一次完整训练步骤；
+    \item \texttt{my\_forward}：前向传播；
+    \item \texttt{my\_cross\_loss}：交叉熵损失计算；
+    \item \texttt{my\_backward}：反向传播；
+    \item \texttt{my\_optimizer\_step}：AdamW 参数更新；
+    \item \texttt{my\_attention\_scores\_matmul}、\texttt{my\_attention\_softmax}、\texttt{my\_attention\_value\_matmul}：self-attention 内部的主要子步骤。
+\end{itemize}
+
+在 Nsight Systems GUI 中，我通过对对应的 NVTX 区间使用 \texttt{Apply to Filter}，再查看 \texttt{Stats System View} 中的 \texttt{CUDA GPU Kernel Summary}，从而统计指定阶段内部的 CUDA kernel 累计时间。
 
 \subsubsection{实验结果分析}
-(a) What is the total time spent on your forward pass? Does it match what we had measured  before with the Python standard library?
-对于small模型，使用python标准库测量的三种context length前向传播时间分别为：60.130 ± 2.800 ms、60.141 ± 1.905 ms、74.061 ± 0.309 ms
-差不太多。原因是？
 
-使用nsys的平均时间是：56.996ms+-3.566ms、56.139ms+-1.673ms、55.684ms+-1.435ms；
-会比用python那边统计的少那么5ms左右，我猜测是nsys是直接统计的kernal时间所以没有一些通信或者框架的开销？
+\paragraph{(a) 前向传播总时间}
 
-(b) What CUDA kernel takes the most cumulative GPU time during the forward pass? 
-How  many times is this kernel invoked during a single forward pass of your model? 
-Is it the same kernel that takes the most runtime when you do both forward and backward passes? 
-(Hint: look at the “CUDA GPU Kernel Summary” under “Stats System View”, and filter using NVTX ranges to identify which parts of the model are responsible for which kernels.)
+根据 Python 标准库计时结果，small 模型在 context length 为256、512、1024时的前向传播平均耗时分别为：
 
-对nvtx.my\_forward的time line应用filter，然后看看它的kernal summary，发现是\texttt{ampere\_sgemm\_128x64\_tn}，总用时7.238 ms
-调用次数85，时间占比69.8\%——为啥这里一个forward用时55ms，而kernal的总用时只有10ms左右呢？
-——猜测大概是nsys的profiler开销（尤其是追踪pytorch函数的），加上cpu调用api和dispatch kernel的开销，导致总时间比kernel的时间多了很多。
-因为nsys只是统计kernal在gpu上跑的时间。
+\[
+28.841\ \text{ms},\quad
+28.189\ \text{ms},\quad
+72.593\ \text{ms}.
+\]
 
+在去掉 PyTorch 自动函数级 trace 后，Nsight Systems 中 \texttt{my\_forward} NVTX 区间显示的耗时与 Python 标准库测量结果基本一致。此前开启 \texttt{--pytorch=functions-trace,autograd-shapes-nvtx} 时，Nsight 中 forward 区间时间明显偏大，这是因为 PyTorch 函数级 tracing 会插入大量额外 NVTX 事件和记录开销，导致 profiler 本身显著影响运行时间。因此，后续分析主要使用手动添加的 NVTX 标记，而不启用 PyTorch 自动函数级 trace。
 
+对于 small 模型，context length 从256增加到512时，forward 时间几乎没有增加；但当 context length 增加到1024时，forward 时间明显增加到约72.6 ms。这可能是因为在较短序列长度下，GPU 调度开销、kernel launch 开销以及 GPU 利用率等因素占比较高，而当序列长度达到1024后，attention 中随序列长度平方增长的计算和显存访问开销开始占据主导。
 
+对于 medium 模型，context length 为256和512时，前向传播时间分别为：
+
+\[
+57.477\ \text{ms},\quad
+75.015\ \text{ms}.
+\]
+
+medium 模型在 context length 1024 时由于显存不足无法完成完整训练步骤。
+
+\paragraph{(b) 前向传播中累计 GPU 时间最高的 CUDA kernel}
+
+为了回答该问题，我在 Nsight Systems GUI 中对单次 \texttt{my\_forward} NVTX 区间应用 filter，然后查看 \texttt{CUDA GPU Kernel Summary}，并按照 \texttt{Total Time} 降序排序。
+
+以 small 模型、context length 256 为例，前向传播中累计 GPU 时间最高的 CUDA kernel 是：
+
+\begin{center}
+\texttt{ampere\_sgemm\_128x64\_tn}
+\end{center}
+
+该 kernel 在一次 forward pass 中被调用85次，累计 GPU 执行时间为7.238 ms，占该 forward 区间内 GPU kernel 总时间的69.7\%。该 kernel 是 Ampere 架构上的 SGEMM 矩阵乘法 kernel，即 FP32 general matrix multiplication。这个结果符合预期，因为 Transformer 的主要计算量来自线性层、MLP 以及 attention 中的矩阵乘法。
+
+需要注意的是，这里的7.238 ms并不是整个 forward pass 的 wall-clock 时间，而只是某一种 CUDA kernel 的累计 GPU 执行时间。一次 \texttt{my\_forward} NVTX 区间的总耗时会包含 CPU 侧 PyTorch dispatch、CUDA API launch、cuBLAS 调用开销、kernel 之间的空隙以及 profiler 本身的记录开销；而 \texttt{CUDA GPU Kernel Summary} 只统计 GPU kernel 实际在 GPU 上执行的时间。因此，forward NVTX 区间的总时间通常会大于单个 kernel 的累计执行时间。
+
+在同时执行 forward 和 backward 的 profile 中，排名靠前的 kernel 仍然主要是 SGEMM/GEMM 类矩阵乘法 kernel。这说明无论是前向传播还是反向传播，矩阵乘法都是 Transformer 计算中的主要 GPU 时间消耗来源。
+
+\paragraph{(c) 除矩阵乘法以外的显著 CUDA kernel}
+
+在 \texttt{my\_forward} 区间内，除了 SGEMM/GEMM 矩阵乘法 kernel 之外，还可以观察到一些非矩阵乘法 kernel 占据非忽略的 CUDA runtime，例如：
+
+\begin{itemize}
+    \item \texttt{at::native::elementwise\_kernel}；
+    \item \texttt{at::native::vectorized\_elementwise\_kernel}；
+    \item reduction 相关 kernel；
+    \item softmax 相关 kernel；
+    \item cuBLASLt 的 split-K reduction kernel。
+\end{itemize}
+
+这些 kernel 对应逐元素操作、归一化、激活函数、attention softmax、张量 reduction 或 cuBLAS 内部归约等操作。虽然这些操作的 FLOPs 远少于矩阵乘法，但它们往往受到显存带宽、kernel launch 开销和访存模式的影响，因此仍然会占据一定的运行时间。
+
+\paragraph{(d) 完整训练步骤中矩阵乘法占比的变化}
+
+完整训练步骤包括 forward、loss、backward 和 optimizer step。与仅进行 forward 相比，加入 backward 后会额外引入大量梯度计算相关的矩阵乘法 kernel，因此 GEMM 类 kernel 仍然是主要的 GPU 时间来源。不过，完整训练步骤还会引入更多逐元素 kernel、reduction kernel 以及优化器更新 kernel。
+
+AdamW 的 optimizer step 与 forward/backward 不同，它基本不进行大型矩阵乘法，而是对参数、动量和二阶矩估计进行逐元素更新。因此，在 \texttt{my\_optimizer\_step} 区间内，主要出现的是 \texttt{multi\_tensor\_apply\_kernel}、\texttt{elementwise\_kernel} 和 \texttt{vectorized\_elementwise\_kernel} 等逐元素更新相关 kernel。也就是说，完整训练步骤中矩阵乘法的绝对耗时会增加，但由于 backward 和 optimizer 引入了更多其他类型 kernel，矩阵乘法在总时间中的占比不一定会像 forward-only 中那么高。
+
+\paragraph{(e) self-attention 中 softmax 与矩阵乘法的比较}
+
+在 self-attention 层内部，我分别对 attention score 矩阵乘法、softmax 和 value 矩阵乘法添加了 NVTX 标记：
+
+\begin{itemize}
+    \item \texttt{my\_attention\_scores\_matmul}：计算 $QK^\top$；
+    \item \texttt{my\_attention\_softmax}：对 attention scores 计算 softmax；
+    \item \texttt{my\_attention\_value\_matmul}：计算 $\mathrm{softmax}(QK^\top)V$。
+\end{itemize}
+
+理论上，attention 中两次矩阵乘法的 FLOPs 远大于 softmax。然而在实际 profile 中，softmax 的运行时间并不会按照 FLOPs 比例变得极小。这是因为矩阵乘法可以由 cuBLAS 或 Tensor Core 高度优化，计算密集度较高；而 softmax 涉及读取 attention score、求最大值、指数运算、求和、归一化以及写回结果，整体更容易受到显存带宽、访存模式和 kernel launch 开销的影响。因此，softmax 的 FLOPs 虽然远少于矩阵乘法，但它仍然可能占据不可忽略的 CUDA runtime。
 
 \end{document}

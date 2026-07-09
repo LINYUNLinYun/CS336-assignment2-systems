@@ -1,21 +1,21 @@
 import argparse
 import math
-import torch
 import timeit
 import statistics
-import torch.nn.functional as F
-from pathlib import Path
-import pandas as pd
-import cs336_basics.model
 from contextlib import nullcontext
+from pathlib import Path
+
+import pandas as pd
+import torch
+import torch.nn.functional as F
 import torch.cuda.nvtx as nvtx
-from einops import einsum, rearrange
-import einx
-import torch.nn as nn
-from jaxtyping import Bool, Float, Int
+from einops import einsum
+from jaxtyping import Bool, Float
 from torch import Tensor
-from cs336_basics.nn_utils import softmax
+
+import cs336_basics.model
 from cs336_basics.model import BasicsTransformerLM
+from cs336_basics.nn_utils import softmax
 
 
 MODEL_CONFIGS = {
@@ -51,23 +51,59 @@ MODEL_CONFIGS = {
     },
 }
 
-def run_step(
-    mode: str,
-    measure: bool = False,
-    annotate: bool = False,     # 是否开启 nvtx 标记
-):
+
+def make_autocast_context(mixed_precision: str):
+    """Return the context manager used for the forward pass."""
+    if mixed_precision == "bf16":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    if mixed_precision == "none":
+        return nullcontext()
+    raise ValueError(f"Unsupported mixed precision mode: {mixed_precision}")
+
+
+@nvtx.range("scaled dot product attention")
+def annotated_scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys    d_k"],
+    V: Float[Tensor, " ... keys    d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    """Scaled dot-product attention with NVTX ranges for profiling."""
+    d_k = K.shape[-1]
+
+    # QK^T matrix multiplication + scaling.
+    with nvtx.range("my_attn_scores"):
+        attention_scores = (
+            einsum(Q, K, "... query d_k, ... key d_k -> ... query key")
+            / math.sqrt(d_k)
+        )
+
+    # Masking is separate from the score matmul so that the matmul timing is clean.
+    if mask is not None:
+        with nvtx.range("my_attn_mask"):
+            attention_scores = torch.where(mask, attention_scores, float("-inf"))
+
+    with nvtx.range("my_attn_softmax"):
+        attention_weights = softmax(attention_scores, dim=-1)
+
+    with nvtx.range("my_attn_output"):
+        output = einsum(
+            attention_weights,
+            V,
+            "... query key, ... key d_v -> ... query d_v",
+        )
+
+    return output
+
+
+def run_step(mode: str, measure: bool = False, annotate: bool = False):
     timings = {}
 
     step_ctx = nvtx.range("my_train_step") if annotate else nullcontext()
 
     with step_ctx:
         # ---------------- Zero grad ----------------
-        zero_grad_ctx = (
-            nvtx.range("my_zero_grad")
-            if annotate
-            else nullcontext()
-        )
-
+        zero_grad_ctx = nvtx.range("my_zero_grad") if annotate else nullcontext()
         with zero_grad_ctx:
             optimizer.zero_grad(set_to_none=True)
 
@@ -76,16 +112,14 @@ def run_step(
             torch.cuda.synchronize()
             start = timeit.default_timer()
 
-        forward_ctx = (
-            nvtx.range("my_forward")
-            if annotate
-            else nullcontext()
-        )
+        forward_ctx = nvtx.range("my_forward") if annotate else nullcontext()
+        amp_ctx = make_autocast_context(args.mixed_precision)
 
         with forward_ctx:
-            logits = model(inputs)
+            with amp_ctx:
+                logits = model(inputs)
 
-            # 让 my_forward 包含 GPU forward kernels 完成时间
+            # Make the NVTX forward range match the measured forward time.
             if measure:
                 torch.cuda.synchronize()
 
@@ -96,19 +130,14 @@ def run_step(
             return timings
 
         # ---------------- Loss ----------------
-        loss_ctx = (
-            nvtx.range("my_cross_loss")
-            if annotate
-            else nullcontext()
-        )
-
+        loss_ctx = nvtx.range("my_cross_loss") if annotate else nullcontext()
         with loss_ctx:
+            # Keep loss/reduction in FP32 for numerical stability.
             loss = F.cross_entropy(
-                logits.reshape(-1, args.vocab_size),
+                logits.float().reshape(-1, args.vocab_size),
                 targets.reshape(-1),
             )
 
-            # 如果你想让 my_cross_loss 的 range 更准确，可以保留
             if measure:
                 torch.cuda.synchronize()
 
@@ -117,16 +146,10 @@ def run_step(
             torch.cuda.synchronize()
             start = timeit.default_timer()
 
-        backward_ctx = (
-            nvtx.range("my_backward")
-            if annotate
-            else nullcontext()
-        )
-
+        backward_ctx = nvtx.range("my_backward") if annotate else nullcontext()
         with backward_ctx:
             loss.backward()
 
-            # 让 my_backward 包含 GPU backward kernels 完成时间
             if measure:
                 torch.cuda.synchronize()
 
@@ -141,16 +164,10 @@ def run_step(
             torch.cuda.synchronize()
             start = timeit.default_timer()
 
-        optimizer_ctx = (
-            nvtx.range("my_optimizer_step")
-            if annotate
-            else nullcontext()
-        )
-
+        optimizer_ctx = nvtx.range("my_optimizer_step") if annotate else nullcontext()
         with optimizer_ctx:
             optimizer.step()
 
-            # 让 my_optimizer_step 包含 GPU optimizer kernels 完成时间
             if measure:
                 torch.cuda.synchronize()
 
@@ -159,26 +176,6 @@ def run_step(
 
     return timings
 
-
-    
-
-@nvtx.range("scaled dot product attention") 
-def annotated_scaled_dot_product_attention(
-        Q: Float[Tensor, " ... queries d_k"],
-        K: Float[Tensor, " ... keys    d_k"],
-        V: Float[Tensor, " ... keys    d_v"],
-        mask: Bool[Tensor, " ... queries keys"] | None = None,
-    ) -> Float[Tensor, " ... queries d_v"]:
-
-    d_k = K.shape[-1]
-    attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
-
-    if mask is not None:
-        attention_scores = torch.where(mask, attention_scores, float("-inf"))
-
-    attention_weights = softmax(attention_scores, dim=-1)  # Softmax over the key dimension
-
-    return einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -198,10 +195,18 @@ if __name__ == "__main__":
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--measurement-steps", type=int, default=10)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--optimizer", default="pytorch", choices=["pytorch", "my"])
+    parser.add_argument(
+        "--mixed-precision",
+        default="none",
+        choices=["none", "bf16"],
+        help="Mixed precision mode: none or bf16",
+    )
     args = parser.parse_args()
 
     config = MODEL_CONFIGS[args.model_size]
-    # 替换实现
+
+    # Monkey-patch the attention implementation before model construction.
     cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
 
     device = torch.device(args.device)
@@ -209,7 +214,7 @@ if __name__ == "__main__":
         vocab_size=args.vocab_size,
         context_length=args.context_length,
         **config,
-    ).to(args.device)
+    ).to(device)
 
     model.train()
     print(model)
@@ -228,14 +233,26 @@ if __name__ == "__main__":
         device=device,
     )
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=1e-3,
-    )
+    if args.optimizer == "pytorch":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=1e-3,
+        )
+    elif args.optimizer == "my":
+        print("using my optimizer --------------")
+        from cs336_basics.optimizer import AdamW
 
+        optimizer = AdamW(
+            model.parameters(),
+            lr=1e-3,
+        )
+    else:
+        raise RuntimeError("invalid optimizer")
+
+    print(f"Precision mode: {args.mixed_precision}")
     print(f"Warming up for {args.warmup_steps} steps...")
 
-    # 空跑几轮 预热
+    # Warm-up steps.
     for _ in range(args.warmup_steps):
         run_step(args.mode, measure=False, annotate=False)
         torch.cuda.synchronize()
@@ -248,7 +265,7 @@ if __name__ == "__main__":
 
     print(f"Measuring {args.measurement_steps} steps...")
 
-    # 正式开始测量
+    # Measurement steps.
     with nvtx.range("my_measurement_region"):
         for _ in range(args.measurement_steps):
             timings = run_step(
@@ -258,7 +275,7 @@ if __name__ == "__main__":
             )
 
             for name, elapsed in timings.items():
-                results[name].append(elapsed * 1000)
+                results[name].append(elapsed * 1000)  # seconds -> ms
 
     print("\nBenchmark results:")
 
@@ -285,27 +302,28 @@ if __name__ == "__main__":
                 "mean_ms": mean_ms,
                 "std_ms": std_ms,
                 "gpu": torch.cuda.get_device_name(device),
+                "precision": args.mixed_precision,
             }
         )
 
-        df = pd.DataFrame(records)
+    df = pd.DataFrame(records)
 
-        output_dir = Path("results")
-        output_dir.mkdir(exist_ok=True)
+    output_dir = Path("results")
+    output_dir.mkdir(exist_ok=True)
 
-        output_file = output_dir / (
-            f"{args.model_size}_{args.mode}_"
-            f"warmup{args.warmup_steps}.csv"
+    output_file = output_dir / (
+        f"{args.model_size}_{args.mode}_"
+        f"{args.mixed_precision}_warmup{args.warmup_steps}.csv"
+    )
+
+    df.to_csv(output_file, index=False)
+
+    print(f"\nResults saved to: {output_file}")
+
+    print("\nLaTeX table:")
+    print(
+        df.to_latex(
+            index=False,
+            float_format="%.3f",
         )
-
-        df.to_csv(output_file, index=False)
-
-        print(f"\nResults saved to: {output_file}")
-
-        print("\nLaTeX table:")
-        print(
-            df.to_latex(
-                index=False,
-                float_format="%.3f",
-            )
-        )
+    )

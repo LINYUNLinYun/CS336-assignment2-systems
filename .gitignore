@@ -1,6 +1,6 @@
 cs336_systems/results/*
 cs336_systems/logs/*
-# cs336_systems/reports/medium_*.nsys-rep
+cs336_systems/reports/*
 
 336_a2_test_venv/
 cs336-spring2024-assignment-2-submission.zip

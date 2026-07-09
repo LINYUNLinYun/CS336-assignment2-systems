@@ -5,14 +5,17 @@ mkdir -p logs
 
 # 你可以在这里改模型规模
 MODEL_SIZES=("small" "medium")
+# MODEL_SIZES=("small" "medium")
 
 # 你可以在这里改 context length
 # 作业要求：大于 128，并且是 2 的幂
-CONTEXT_LENGTHS=(256 512 1024)
+# CONTEXT_LENGTHS=(256 512 1024)
+CONTEXT_LENGTHS=(256 512)
 
 MODE="full_step"
 WARMUP_STEPS=5
 MEASUREMENT_STEPS=10
+MIXED_PRECISION="bf16"  
 
 TRACE_FLAGS="cuda,nvtx,cudnn,cublas,osrt"
 # PYTORCH_FLAGS="functions-trace,autograd-shapes-nvtx"
@@ -28,7 +31,7 @@ echo
 
 for model in "${MODEL_SIZES[@]}"; do
   for ctx in "${CONTEXT_LENGTHS[@]}"; do
-    name="${model}_ctx${ctx}_${MODE}"
+    name="${model}_ctx${ctx}_${MODE}_warmup${WARMUP_STEPS}_mp_${MIXED_PRECISION}"
 
     echo "========================================"
     echo "Running ${name}"
@@ -46,6 +49,7 @@ for model in "${MODEL_SIZES[@]}"; do
       --mode "${MODE}" \
       --warmup-steps "${WARMUP_STEPS}" \
       --measurement-steps "${MEASUREMENT_STEPS}" \
+      --mixed-precision "${MIXED_PRECISION}" \
       2>&1 | tee "logs/${name}.log"
 
     status=${PIPESTATUS[0]}
