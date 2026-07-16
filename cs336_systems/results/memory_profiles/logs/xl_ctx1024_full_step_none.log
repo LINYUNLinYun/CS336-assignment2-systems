@@ -1,0 +1,65 @@
+BasicsTransformerLM(
+  (token_embeddings): Embedding(vocab_size=10000, d=2560)
+  (positional_encoder): RotaryEmbedding(context_length=2, dim/2=1024)
+  (layers): ModuleList(
+    (0-31): 32 x TransformerBlock(
+      (attn): CausalMultiHeadSelfAttention(
+        (q_proj): Linear(d_out=2560, d_in=2560)
+        (k_proj): Linear(d_out=2560, d_in=2560)
+        (v_proj): Linear(d_out=2560, d_in=2560)
+        (output_proj): Linear(d_out=2560, d_in=2560)
+        (positional_encoder): RotaryEmbedding(context_length=2, dim/2=1024)
+      )
+      (ffn): SwiGLU(
+        (w1): Linear(d_out=10240, d_in=2560)
+        (w2): Linear(d_out=2560, d_in=10240)
+        (w3): Linear(d_out=10240, d_in=2560)
+      )
+      (ln1): RMSNorm(hidden_size=2560, eps=1e-05)
+      (ln2): RMSNorm(hidden_size=2560, eps=1e-05)
+    )
+  )
+  (ln_final): RMSNorm(hidden_size=2560, eps=1e-05)
+  (lm_head): Linear(d_out=10000, d_in=2560)
+)
+Precision mode: none
+Warming up for 5 steps...
+Traceback (most recent call last):
+  File "/root/CS336-assignment2-systems/cs336_systems/benchmark_nvtx.py", line 270, in <module>
+    run_step(args.mode, measure=False, annotate=False)
+  File "/root/CS336-assignment2-systems/cs336_systems/benchmark_nvtx.py", line 122, in run_step
+    logits = model(inputs)
+             ^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/cs336-basics/cs336_basics/model.py", line 253, in forward
+    x = layer(x)
+        ^^^^^^^^
+  File "/root/CS336-assignment2-systems/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/cs336-basics/cs336_basics/model.py", line 382, in forward
+    x_attn = self.attn(self.ln1(x))
+             ^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1779, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1790, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/cs336-basics/cs336_basics/model.py", line 520, in forward
+    attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/lib/python3.12/contextlib.py", line 81, in inner
+    return func(*args, **kwds)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/root/CS336-assignment2-systems/cs336_systems/benchmark_nvtx.py", line 77, in annotated_scaled_dot_product_attention
+    einsum(Q, K, "... query d_k, ... key d_k -> ... query key")
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 512.00 MiB. GPU 0 has a total capacity of 94.97 GiB of which 263.75 MiB is free. Including non-PyTorch memory, this process has 94.71 GiB memory in use. Of the allocated memory 88.96 GiB is allocated by PyTorch, and 5.10 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
