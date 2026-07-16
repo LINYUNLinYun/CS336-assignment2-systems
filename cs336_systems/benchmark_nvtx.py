@@ -106,7 +106,7 @@ def run_step(mode: str, measure: bool = False, annotate: bool = False):
         zero_grad_ctx = nvtx.range("my_zero_grad") if annotate else nullcontext()
         with zero_grad_ctx:
             optimizer.zero_grad(set_to_none=True)
-
+        
         # ---------------- Forward ----------------
         if measure:
             torch.cuda.synchronize()
@@ -114,12 +114,13 @@ def run_step(mode: str, measure: bool = False, annotate: bool = False):
 
         forward_ctx = nvtx.range("my_forward") if annotate else nullcontext()
         amp_ctx = make_autocast_context(args.mixed_precision)
+        grad_ctx = torch.no_grad() if mode == "forward" else nullcontext()
 
         with forward_ctx:
-            with amp_ctx:
-                logits = model(inputs)
+            with grad_ctx:
+                with amp_ctx:
+                    logits = model(inputs)
 
-            # Make the NVTX forward range match the measured forward time.
             if measure:
                 torch.cuda.synchronize()
 
