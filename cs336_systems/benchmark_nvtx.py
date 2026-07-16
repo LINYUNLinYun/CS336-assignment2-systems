@@ -278,6 +278,7 @@ if __name__ == "__main__":
     # Start recording memory history. 热身后
     if args.profile_memory:
         torch.cuda.memory._record_memory_history(max_entries=1_000_000)
+        torch.cuda.reset_peak_memory_stats()
 
         run_step(
             args.mode,
@@ -286,6 +287,8 @@ if __name__ == "__main__":
         )
 
         torch.cuda.synchronize()
+        peak_gib = torch.cuda.max_memory_allocated() / 1024**3
+        print(f"Peak allocated memory: {peak_gib:.2f} GiB")
 
         torch.cuda.memory._dump_snapshot(
             args.memory_snapshot
