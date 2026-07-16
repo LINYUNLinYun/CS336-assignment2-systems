@@ -65,6 +65,7 @@ cover/
 
 # Django stuff:
 *.log
+!cs336_systems/results/memory_profiles/logs/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
