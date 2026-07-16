@@ -202,6 +202,18 @@ if __name__ == "__main__":
         choices=["none", "bf16"],
         help="Mixed precision mode: none or bf16",
     )
+    # 内存记录
+    parser.add_argument(
+        "--profile-memory",
+        action="store_true",
+        help="Record a CUDA memory snapshot",
+    )
+
+    parser.add_argument(
+        "--memory-snapshot",
+        default="memory_snapshot.pickle",
+    )
+
     args = parser.parse_args()
 
     config = MODEL_CONFIGS[args.model_size]
@@ -262,6 +274,29 @@ if __name__ == "__main__":
         "backward": [],
         "optimizer": [],
     }
+
+    # Start recording memory history. 热身后
+    if args.profile_memory:
+        torch.cuda.memory._record_memory_history(max_entries=1_000_000)
+
+        run_step(
+            args.mode,
+            measure=False,
+            annotate=True,
+        )
+
+        torch.cuda.synchronize()
+
+        torch.cuda.memory._dump_snapshot(
+            args.memory_snapshot
+        )
+
+        torch.cuda.memory._record_memory_history(
+            enabled=None
+        )
+
+        print(f"Memory snapshot saved to: {args.memory_snapshot}")
+        raise SystemExit(0)
 
     print(f"Measuring {args.measurement_steps} steps...")
 
