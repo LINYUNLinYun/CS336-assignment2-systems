@@ -275,6 +275,9 @@ if __name__ == "__main__":
         "backward": [],
         "optimizer": [],
     }
+    # 清除最后一次 warm-up 留下的梯度
+    optimizer.zero_grad(set_to_none=True)
+    torch.cuda.empty_cache()
 
     # Start recording memory history. 热身后
     if args.profile_memory:

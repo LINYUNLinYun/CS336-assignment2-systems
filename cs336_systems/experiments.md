@@ -215,5 +215,69 @@ nsys分析：
 
 3. 第三是虽然bp16会让矩阵乘法变快但是attention里的几个操作甚至更慢了；可能这种小规模 attention matmul还不够。
 
+## 4. answers for 2.1.6 memory profile
+
+### 实验设置
+参考run_memory_profiles.sh，在pro6000(96GB)上运行，共八种版本：128和2048的context length，forward和full_step两种模式，none和bf16两种精度。每个版本运行一次完整训练步骤，记录显存使用情况。
+
+### 实验结果
+
+#### Add an option to your profiling script to run your model through the memory profiler.  It may be helpful to reuse some of your previous infrastructure (e.g., to activate mixed-precision, load specific model sizes, etc). Then, run your script to get a memory profile of the xl model when either doing inference only (just forward pass) or a full training step.** What do your memory timelines look like? Can you tell which stage is running based on the peaks you see?**
+
+首先，即使是在 pro6000 96GB 显存上，2048 的 context length 也无法运行 full_step，forward 可以运行。128 的 context length 可以运行 full_step。128的forward内存图几乎就是平缓的，因为attention的L×L张量只有128×128，显存开销不大，仅有8MB左右。
+
+而2048，在仅执行forward时，显存时间线呈现约 32 个周期性峰值，分别对应 xl 模型的 32 个 TransformerBlock；这些峰值主要来自每层 attention 中临时创建的大型 L×L 张量，并在该层计算结束后被释放。
+
+完整训练步骤的时间线中，前向传播阶段会逐层保存反向传播所需的激活，因此显存整体上升；随后在反向传播阶段，这些激活逐层释放并产生梯度，而优化器阶段则会访问或更新参数及其状态。由周期性 attention 峰值、显存累积以及随后释放的变化，可以大致区分 forward、backward 和 optimizer 阶段。
+
+由于跑不了2048的full_step(1024的也跑不了)，所以这里只放2048的forward和512的full_step的显存时间线图。
+可以很明显地观察到32个峰值：
+![alt text](image.png)
+
+可以观察到显存不断地上升累积，因为要保存激活值用作反向传播，到了反向传播，保存的**激活值（一些中间结果）**被释放，但与此同时又会生成参数梯度，所以显存会缓慢下降。最后那个尖峰是optimizer阶段的显存峰值：
+![alt text](image-2.png)
 
 
+#### What is the peak memory usage of each context length when doing a forward pass? What  about when doing a full training step?
+以下都是全精度的：
+| Context length | Forward-only peak memory (GiB) | Full training step peak memory (GiB) |
+|---:|---:|---:|
+| 128  | 12.91 | 63.13 |
+| 512  | 13.44 | 65.54 |
+| 1024  | 15.6 | OOM |
+| 2048 | 21.30 | OOM |
+
+全精度下模型参数约12.5 GiB，forward阶段，多余的激活值随着上下文占用从0.41-8.8 GiB不等，大致可以理解为随着上下文长度增加有一个二次增长（不严格的）；反而是全阶段的显存占用几乎不随上下文长度变化，主要是因为全阶段的显存占用主要来自模型参数和优化器状态，而这些在不同上下文长度下基本保持不变。
+
+####  Find the peak memory usage of the xl model when using mixed-precision, for both a forward pass and a full training step. Does mixed-precision significantly affect memory usage?
+
+以下都是bf16精度的：
+| Context length | Forward-only peak memory (GiB) | Full training step peak memory (GiB) |
+|---:|---:|---:|
+| 128  | 19.14 | 63.31 |
+| 512  | 19.40 | 63.72 |
+| 1024  | 20.63 | OOM |
+| 2048 | 25.35 | OOM |
+
+这就很诡异了，混合精度竟然完全没有节省显存，甚至还有副作用！BF16反而比 FP32高，主要是 autocast 保留原始 FP32参数，同时缓存转换后的 BF16权重副本。这个缓存大约增加6 GiB，和结果中的差值基本吻合。
+
+#### Consider the xl model. Given our reference hyperparameters, what is the size of a tensor of activations in the Transformer residual stream, in single-precision? Give this size in MiB (i.e., divide the number of bytes by 1024^2).
+
+For the XL model, a residual-stream activation has shape $4×2048×2560$. In FP32, its size is $4×2048×2560×4/1024^2=80 MiB$.
+
+所谓的残差流，就是transformer中每一层的主干x，每一层的x都会加上残差连接，作为下一层的输入。
+
+#### Now look closely at the “Active Memory Timeline” from pytorch.org/memory_viz of a memory snapshot of the xl model doing a forward pass. When you reduce the “Detail” level, the tool hides the smallest allocations to the corresponding level (e.g., putting “Detail” at 10% only shows the 10% largest allocations). What is the size of the largest allocations shown? Looking through the stack trace, can you tell where those allocations come from?
+
+以2048的forward为例，显存时间线中最大的分配约为2.0GB。
+
+
+最大单次分配计算，4个batch，32个头，每个头都有一个2048^2的score，总共就是：
+$$
+\frac{4\times32\times2048\times2048\times4}{1024^3}
+=2\ \text{GiB}
+$$
+看Stack trace可发现：最上面是malloc和allocate的内存操作，然后到一些算子，再到pytorch api；还有个发现是，不仅torch.where、torch.masked_fill、torch.softmax甚至一个减法操作都可能会产生一个新的张量，都会有一次malloc和allocate的内存分配——他这个attention的实现是很不高效的。且它这个复杂度是O(L^2)，理论上QKV可以分块计算再累计，可以降低复杂度。
+
+
+#### 
