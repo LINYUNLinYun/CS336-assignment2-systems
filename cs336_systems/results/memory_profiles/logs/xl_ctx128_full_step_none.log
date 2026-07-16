@@ -1,0 +1,58 @@
+BasicsTransformerLM(
+  (token_embeddings): Embedding(vocab_size=10000, d=2560)
+  (positional_encoder): RotaryEmbedding(context_length=2, dim/2=128)
+  (layers): ModuleList(
+    (0-31): 32 x TransformerBlock(
+      (attn): CausalMultiHeadSelfAttention(
+        (q_proj): Linear(d_out=2560, d_in=2560)
+        (k_proj): Linear(d_out=2560, d_in=2560)
+        (v_proj): Linear(d_out=2560, d_in=2560)
+        (output_proj): Linear(d_out=2560, d_in=2560)
+        (positional_encoder): RotaryEmbedding(context_length=2, dim/2=128)
+      )
+      (ffn): SwiGLU(
+        (w1): Linear(d_out=10240, d_in=2560)
+        (w2): Linear(d_out=2560, d_in=10240)
+        (w3): Linear(d_out=10240, d_in=2560)
+      )
+      (ln1): RMSNorm(hidden_size=2560, eps=1e-05)
+      (ln2): RMSNorm(hidden_size=2560, eps=1e-05)
+    )
+  )
+  (ln_final): RMSNorm(hidden_size=2560, eps=1e-05)
+  (lm_head): Linear(d_out=10000, d_in=2560)
+)
+Precision mode: none
+Warming up for 5 steps...
+Traceback (most recent call last):
+  File "/root/code/cs336-assignments/CS336-assignment2-systems/cs336_systems/benchmark_nvtx.py", line 270, in <module>
+    run_step(args.mode, measure=False, annotate=False)
+    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/code/cs336-assignments/CS336-assignment2-systems/cs336_systems/benchmark_nvtx.py", line 152, in run_step
+    loss.backward()
+    ~~~~~~~~~~~~~^^
+  File "/root/code/cs336-assignments/CS336-assignment2-systems/.venv/lib/python3.13/site-packages/torch/_tensor.py", line 631, in backward
+    torch.autograd.backward(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        self, gradient, retain_graph, create_graph, inputs=inputs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/root/code/cs336-assignments/CS336-assignment2-systems/.venv/lib/python3.13/site-packages/torch/autograd/__init__.py", line 381, in backward
+    _engine_run_backward(
+    ~~~~~~~~~~~~~~~~~~~~^
+        tensors,
+        ^^^^^^^^
+    ...<5 lines>...
+        accumulate_grad=True,
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/root/code/cs336-assignments/CS336-assignment2-systems/.venv/lib/python3.13/site-packages/torch/autograd/graph.py", line 869, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        t_outputs, *args, **kwargs
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )  # Calls into the C++ engine to run the backward pass
+    ^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 100.00 MiB. GPU 0 has a total capacity of 23.52 GiB of which 77.69 MiB is free. Process 1027359 has 23.43 GiB memory in use. Of the allocated memory 22.81 GiB is allocated by PyTorch, and 169.18 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
