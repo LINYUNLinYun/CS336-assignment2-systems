@@ -1,0 +1,28 @@
+BasicsTransformerLM(
+  (token_embeddings): Embedding(vocab_size=10000, d=2560)
+  (positional_encoder): RotaryEmbedding(context_length=2, dim/2=512)
+  (layers): ModuleList(
+    (0-31): 32 x TransformerBlock(
+      (attn): CausalMultiHeadSelfAttention(
+        (q_proj): Linear(d_out=2560, d_in=2560)
+        (k_proj): Linear(d_out=2560, d_in=2560)
+        (v_proj): Linear(d_out=2560, d_in=2560)
+        (output_proj): Linear(d_out=2560, d_in=2560)
+        (positional_encoder): RotaryEmbedding(context_length=2, dim/2=512)
+      )
+      (ffn): SwiGLU(
+        (w1): Linear(d_out=10240, d_in=2560)
+        (w2): Linear(d_out=2560, d_in=10240)
+        (w3): Linear(d_out=10240, d_in=2560)
+      )
+      (ln1): RMSNorm(hidden_size=2560, eps=1e-05)
+      (ln2): RMSNorm(hidden_size=2560, eps=1e-05)
+    )
+  )
+  (ln_final): RMSNorm(hidden_size=2560, eps=1e-05)
+  (lm_head): Linear(d_out=10000, d_in=2560)
+)
+Precision mode: none
+Warming up for 5 steps...
+Peak allocated memory: 65.54 GiB
+Memory snapshot saved to: results/memory_profiles/xl_ctx512_full_step_none.pickle
