@@ -14,7 +14,7 @@ from jaxtyping import Bool, Float
 from torch import Tensor
 
 import cs336_basics.model
-from cs336_basics.model import BasicsTransformerLM
+from cs336_basics.model import BasicsTransformerLM, TransformerBlock
 from cs336_basics.nn_utils import softmax
 
 
@@ -94,6 +94,35 @@ def annotated_scaled_dot_product_attention(
         )
 
     return output
+
+# Save the original implementation before monkey-patching.
+_original_transformer_block_forward = TransformerBlock.forward
+
+
+def annotated_transformer_block_forward(
+    self: TransformerBlock,
+    x: Tensor,
+):
+    """Wrap one complete TransformerBlock forward pass in an NVTX range."""
+    block_idx = getattr(self, "_nvtx_block_idx", -1)
+
+    with nvtx.range(f"transformer_block_{block_idx}_forward"):
+        return _original_transformer_block_forward(self, x)
+    
+def transformer_block_backward_pre_hook(
+    module: TransformerBlock,
+    grad_output,
+):
+    block_idx = getattr(module, "_nvtx_block_idx", -1)
+    nvtx.range_push(f"transformer_block_{block_idx}_backward")
+
+
+def transformer_block_backward_hook(
+    module: TransformerBlock,
+    grad_input,
+    grad_output,
+):
+    nvtx.range_pop()
 
 
 def run_step(mode: str, measure: bool = False, annotate: bool = False):
@@ -214,6 +243,8 @@ if __name__ == "__main__":
         "--memory-snapshot",
         default="memory_snapshot.pickle",
     )
+    # 标记tranformer block 
+    parser.add_argument("--annotate-blocks", action="store_true", help="Annotate each TransformerBlock with NVTX ranges")
 
     args = parser.parse_args()
 
@@ -221,6 +252,8 @@ if __name__ == "__main__":
 
     # Monkey-patch the attention implementation before model construction.
     cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+    if args.annotate_blocks:
+        TransformerBlock.forward = annotated_transformer_block_forward
 
     device = torch.device(args.device)
     model = BasicsTransformerLM(
@@ -228,6 +261,21 @@ if __name__ == "__main__":
         context_length=args.context_length,
         **config,
     ).to(device)
+    # backward hook
+    if args.annotate_blocks:
+        backward_hook_handles = []
+        for block_idx, block in enumerate(model.layers):
+            # 为block编号
+            block._nvtx_block_idx = block_idx
+
+            pre_handle = block.register_full_backward_pre_hook(
+                transformer_block_backward_pre_hook
+            )
+            post_handle = block.register_full_backward_hook(
+                transformer_block_backward_hook
+            )
+
+            backward_hook_handles.extend([pre_handle, post_handle])
 
     model.train()
     print(model)
