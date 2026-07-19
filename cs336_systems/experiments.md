@@ -2,7 +2,9 @@
 
 **作者：** linyun
 
-**日期：** 2026-07-08
+**日期：** 2026-07-08。
+
+
 
 ## 1. benchmark.py
 
@@ -277,7 +279,96 @@ $$
 \frac{4\times32\times2048\times2048\times4}{1024^3}
 =2\ \text{GiB}
 $$
-看Stack trace可发现：最上面是malloc和allocate的内存操作，然后到一些算子，再到pytorch api；还有个发现是，不仅torch.where、torch.masked_fill、torch.softmax甚至一个减法操作都可能会产生一个新的张量，都会有一次malloc和allocate的内存分配——他这个attention的实现是很不高效的。且它这个复杂度是O(L^2)，理论上QKV可以分块计算再累计，可以降低复杂度。
+看Stack trace可发现：最上面是malloc和allocate的内存操作，然后到一些算子，再到pytorch api；还有个发现是，不仅torch.where、torch.masked_fill、torch.softmax甚至一个减法操作都可能会产生一个新的张量，都会有一次malloc和allocate的内存分配——他这个attention的实现是很不高效的。且它这个复杂度是O(L^2)，理论上QKV可以分块计算再累计，可以降低显存复杂度。
 
 
-#### 
+#### ...Does the result match what you expect?
+
+- 环境：XL、batch size 4、context length 128、FP32。单个 TransformerBlock forward：`41.01 → 41.17 GiB`。 保存的激活近似为：$
+  (41.17-41.01)\times1024\approx164\text{ MiB}$
+- 单个 TransformerBlock backward：`50.05 → 50.35 GiB`。backward 净增加：$(50.35-50.05)\times1024\approx307\text{ MiB}$
+- 根据“释放 saved tensors，同时生成梯度”的关系，梯度估算为：
+  $$
+  164+307\approx471\text{ MiB}
+  $$
+- 误差来源：Nsight 读数精度、区间边界、PyTorch caching allocator，以及 profiler 自身开销。
+- 五个最大贡献操作：暂缺，找了半天也没在nsys gui里找到
+
+
+## 3. Single-GPU Memory
+梯度检查点（gradient checkpointing），也称为激活检查点（activation checkpointing），降低显存占用。
+### 3.1 Autograd Residuals
+
+为了能自动求导，其实PyTorch在前向传播时会保存一些中间结果（residuals），这些中间结果在反向传播时会被使用。
+
+详细的可以看看scripts/autograd_experiment.py，一个简单的RMS操作中间产生了大量的saved tensor，导致显存占用大幅增加——这也就是为什么训练需要的显存远不止模型参数，还要包括参数梯度、优化器状态、forward 为 backward 保存的激活 + 临时张量。
+
+其中 saved tensors 往往占用大量显存。
+后面的技术都是在处理这个问题：
+- 算子融合：减少不必要的中间结果和重复保存。
+- Activation checkpointing：不保存所有激活，backward 时重新计算。
+- FlashAttention：避免保存巨大的完整 attention 矩阵。
+- 混合精度：让部分张量使用更少字节。
+- FSDP/分片：把参数、梯度和优化器状态分散到多张 GPU。
+
+#### 3.1.1 Operator Fusion
+算子融合后，冗余的saved tensor会被消除，显存占用降低。但是必要的参数权重还是不变的。
+
+### 3.2 Activation Checkpointing
+#### 3.2.1 Recomputation 
+Consider a Transformer with **N** identical blocks stacked sequentially. Without any checkpointing, all N blocks’ worth of residuals are kept alive simultaneously, giving O(N ) peak activation memory. We have a free hand to wrap any subset of the forward pass in checkpoint, including nesting checkpoint calls inside one another. 
+
+(a) **What checkpointing strategy minimizes peak activation memory**, ignoring the compute cost?  Describe how you would arrange the checkpoint calls (a code sketch is fine), and give the asymptotic peak activation memory and compute of your strategy as a function of N . Assume the residuals saved by a single block dominate any per-checkpoint bookkeeping.  Deliverable: A 3-5 sentence description of the strategy and its asymptotic peak memory, plus a short code sketch.
+
+**显存的峰值取决于有多少 checkpoint 输入张量同时真实保存在 GPU 上**。所以虽然可以为每个 TransformerBlock 都做 checkpoint，此时为一个32叉子树，深度为1。但这样会导致所有的 checkpoint 输入张量同时保存在 GPU 上，显存峰值仍然是 O(N)。大约峰值为$32\times 160MB + 3.65GB \approx 8.5GB$。
+
+而理论最优是，二分递归地对 TransformerBlock 做 checkpoint，形成一个二叉树，深度为 log2(N)。每次递归只保留当前 checkpoint 的输入张量，其他的 checkpoint 输入张量在递归返回时被释放。这样显存峰值为 O(log N)，大约峰值为$5\times 160MB + 3.65GB \approx 4.45GB$。注意，递归的逻辑checkpoint是不少的，只不过活跃checkpoint输入张量的数量是 log2(N) 个。
+
+```python 
+from torch.utils.checkpoint import checkpoint
+
+
+def recursive_checkpoint(blocks, x):
+    n = len(blocks)
+
+    # 递归终点：只剩一个 TransformerBlock
+    if n == 1:
+        return blocks[0](x)
+
+    mid = n // 2
+    left_blocks = blocks[:mid]
+    right_blocks = blocks[mid:]
+
+    # 对左半部分递归 checkpoint
+    x = checkpoint(
+        lambda hidden: recursive_checkpoint(left_blocks, hidden),
+        x,
+        use_reentrant=False,
+    )
+
+    # 对右半部分递归 checkpoint
+    x = checkpoint(
+        lambda hidden: recursive_checkpoint(right_blocks, hidden),
+        x,
+        use_reentrant=False,
+    )
+
+    return x
+```
+
+(b) Consider the xl model config with batch size 4 and sequence length 2048 as above. If you only  have the time/compute budget to run one step of recomputation (meaning you may not nest checkpoint calls), what is the best checkpointing strategy to reduce peak memory? Profile your run’s peak memory to validate your hypothesis. Compare the peak memory of the next smaller and larger checkpointing block sizes to be sure.
+
+既然只能重计算一次，那最优答案就是每个block都分一个ckp；但实际表现如何，开启下列实验，先做个小规模的验证：
+
+```bash
+python benchmark_checkpoint.py \
+      --model-size medium \
+      --context-length 512 \
+      --batch-size 4 \
+      --num-checkpoints 6 \
+      --warmup-steps 2 \
+      --measurement-steps 3
+```
+
+
+

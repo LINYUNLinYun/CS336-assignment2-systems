@@ -78,3 +78,4 @@ loss.backward()
 print("\ngradient dtype:")
 for name, param in model.named_parameters():
     print(name, param.grad.dtype)
+
