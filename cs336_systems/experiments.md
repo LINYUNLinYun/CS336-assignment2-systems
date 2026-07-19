@@ -369,6 +369,86 @@ python benchmark_checkpoint.py \
       --warmup-steps 2 \
       --measurement-steps 3
 ```
+完整实验脚本：
+
+```shell
+OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 \
+uv run python benchmark_checkpoint.py \
+  --model-size xl \
+  --context-length 2048 \
+  --batch-size 4 \
+  --num-checkpoints 32 \
+  --warmup-steps 1 \
+  --measurement-steps 1 \
+  --optimizer pytorch \
+  --mixed-precision none
+```
+结果如下，事实证明采用acitvation checkpointing策略能够有效降低峰值显存使用，原本都跑不了全精度xl模型2048上下文的训练的，现在不仅能跑而且速度也还可以：
+| 每组 Block 数 | Checkpoint 数 |                平均时间 |           峰值显存 |
+| ---------: | -----------: | ------------------: | -------------: |
+|          1 |           32 |   6898.877 ms（仅测1次） | **64.130 GiB** |
+|          2 |           16 | 7027.732 ± 2.232 ms |     69.725 GiB |
+|          4 |            8 | 7093.540 ± 1.372 ms |     81.542 GiB |
 
 
+
+$$
+4\times2048\times2560\times4
+=83,886,080\text{ bytes}\\
+
+\frac{83,886,080}{1024^2}
+=80\text{ MiB}
+$$
+
+当使用 32 个 checkpoint 时，保存的入口张量合计约为：
+
+$$
+32\times80\text{ MiB}
+=2560\text{ MiB}
+=2.5\text{ GiB}
+$$
+即使采用32个checkpoint，保存的入口张量也只有2.5 GiB，相比于要维护32个 TransformerBlock 的所有激活值，显存占用大大降低！！！这也是checkpoint技术的意义。但是也需要看到32 个 block 都会在 backward 时重计算一次，相当于做了两次forward。
+
+实验结果还显示，不使用嵌套checkpoint的情况下，一个step的时间差不多，这是因为即使checkpoint少了但是forward还是要执行的：
+- 32 checkpoint：约 6.9 s
+- 16 checkpoint：约 7.0 s
+- 8 checkpoint：约 7.1 s
+
+
+使用嵌套可以进一步减少显存占用，但会进一步增加重计算开销。
+
+| 策略                |                峰值激活显存 |         总计算量 |
+| ----------------- | --------------------: | -----------: |
+| 不使用 checkpoint    |                O(N) |       O(N) |
+| 非嵌套 checkpoint    | $O(\sqrt N)$，具体常数可能不同 |       O(N) |
+| 平衡递归嵌套 checkpoint |           $O(\log N)$ | $O(N\log N)$ |
+
+
+开始二分嵌套 Checkpoint 实验：
+```shell
+OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 \
+uv run python benchmark_checkpoint.py \
+  --checkpoint-strategy binary_nested \
+  --model-size xl \
+  --context-length 2048 \
+  --batch-size 4 \
+  --warmup-steps 1 \
+  --measurement-steps 3 \
+  --optimizer pytorch \
+  --mixed-precision none
+```
+
+| Checkpoint 策略       |  每组 Block 数 |                 训练时间 |       峰值显存 |
+| ------------------- | ----------: | -------------------: | ---------: |
+| 非嵌套，32 个 checkpoint |           1 |            约 6899 ms | 64.130 GiB |
+| 非嵌套，16 个 checkpoint |           2 |  7027.732 ± 2.232 ms | 69.725 GiB |
+| 非嵌套，8 个 checkpoint  |           4 |  7093.540 ± 1.372 ms | 81.542 GiB |
+| 二分嵌套 checkpoint     | 递归到单个 Block | 10557.537 ± 1.878 ms | 64.131 GiB |
+
+
+每个 TransformerBlock 单独使用非嵌套 checkpoint 时，峰值显存最低，仅为 64.130 GiB。二分嵌套的峰值显存几乎相同，但运行时间增加约 53%，因为同一个 block 会在不同递归层级中被多次重计算。
+
+二分嵌套没有进一步降低完整训练步骤的峰值，可能是因为两种策略都已经将重计算粒度缩小到单个 block，而且最终峰值由梯度、AdamW 状态及优化器临时张量决定。因此，在当前 32 层 XL 模型上，每个 block 单独 checkpoint 是更实用的策略。 
+
+如果进一步增加模型深度，**二分嵌套 checkpoint 的优势可能会更加明显，因为它可以将峰值显存降低到 O(log N)**
 

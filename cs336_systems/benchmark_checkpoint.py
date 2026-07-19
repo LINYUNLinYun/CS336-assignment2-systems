@@ -82,25 +82,54 @@ def run_layer_group(hidden: Tensor, layers: tuple[nn.Module, ...]) -> Tensor:
     return hidden
 
 
+def run_binary_nested(
+    hidden: Tensor,
+    layers: tuple[nn.Module, ...],
+) -> Tensor:
+    """Recursively bisect layers and nest checkpoints down to one block."""
+    if len(layers) == 1:
+        return layers[0](hidden)
+
+    midpoint = len(layers) // 2
+    left_layers = layers[:midpoint]
+    right_layers = layers[midpoint:]
+
+    def run_left(x: Tensor) -> Tensor:
+        return run_binary_nested(x, left_layers)
+
+    def run_right(x: Tensor) -> Tensor:
+        return run_binary_nested(x, right_layers)
+
+    hidden = checkpoint(run_left, hidden, use_reentrant=False)
+    hidden = checkpoint(run_right, hidden, use_reentrant=False)
+    return hidden
+
+
 def checkpointed_model_forward(
     model: BasicsTransformerLM,
     token_ids: Tensor,
     layer_groups: list[tuple[nn.Module, ...]],
+    checkpoint_strategy: str,
 ) -> Tensor:
-    """Run BasicsTransformerLM with one non-nested checkpoint per layer group."""
+    """Run BasicsTransformerLM with flat or recursively nested checkpoints."""
     hidden = model.token_embeddings(token_ids)
 
-    for group in layer_groups:
-        # Bind the current group as a default argument. Without `group=group`,
-        # Python's late-bound closure could use the final group during backward.
-        def run_group(x: Tensor, group: tuple[nn.Module, ...] = group) -> Tensor:
-            return run_layer_group(x, group)
+    if checkpoint_strategy == "flat":
+        for group in layer_groups:
+            # Bind the current group as a default argument. Without `group=group`,
+            # Python's late-bound closure could use the final group during backward.
+            def run_group(x: Tensor, group: tuple[nn.Module, ...] = group) -> Tensor:
+                return run_layer_group(x, group)
 
-        hidden = checkpoint(
-            run_group,
-            hidden,
-            use_reentrant=False,
-        )
+            hidden = checkpoint(
+                run_group,
+                hidden,
+                use_reentrant=False,
+            )
+    elif checkpoint_strategy == "binary_nested":
+        hidden = run_binary_nested(hidden, tuple(model.layers))
+    else:
+        raise ValueError(f"Unknown checkpoint strategy: {checkpoint_strategy}")
 
     hidden = model.ln_final(hidden)
     return model.lm_head(hidden)
@@ -130,6 +159,7 @@ def run_training_step(
     optimizer,
     vocab_size: int,
     mixed_precision: str,
+    checkpoint_strategy: str,
 ) -> float:
     """Run forward, loss, backward, and optimizer; return the scalar loss."""
     if mixed_precision == "bf16":
@@ -138,7 +168,12 @@ def run_training_step(
         amp_context = torch.autocast(device_type="cuda", enabled=False)
 
     with amp_context:
-        logits = checkpointed_model_forward(model, inputs, layer_groups)
+        logits = checkpointed_model_forward(
+            model,
+            inputs,
+            layer_groups,
+            checkpoint_strategy,
+        )
 
     # Keep the loss/reduction in FP32, matching benchmark_nvtx.py.
     loss = F.cross_entropy(
@@ -154,14 +189,22 @@ def run_training_step(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark non-nested activation checkpointing with a selectable "
-            "number of checkpoint groups."
+            "Benchmark flat or binary-nested activation checkpointing."
         )
     )
     parser.add_argument("--model-size", choices=MODEL_CONFIGS, default="xl")
     parser.add_argument("--context-length", type=int, default=2048)
     parser.add_argument("--vocab-size", type=int, default=10000)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--checkpoint-strategy",
+        choices=["flat", "binary_nested"],
+        default="flat",
+        help=(
+            "flat uses --num-checkpoints non-nested groups; binary_nested "
+            "recursively bisects all Transformer blocks down to one block."
+        ),
+    )
     parser.add_argument(
         "--num-checkpoints",
         type=int,
@@ -216,8 +259,18 @@ def main() -> None:
     ).to(device)
     model.train()
 
-    layer_groups = split_layers(model.layers, args.num_checkpoints)
-    group_sizes = [len(group) for group in layer_groups]
+    if args.checkpoint_strategy == "flat":
+        layer_groups = split_layers(model.layers, args.num_checkpoints)
+        group_sizes = [len(group) for group in layer_groups]
+        recursion_depth = 1
+        logical_checkpoint_calls = args.num_checkpoints
+    else:
+        layer_groups = []
+        group_sizes = []
+        recursion_depth = (num_layers - 1).bit_length()
+        # A full binary tree with N leaves has 2N-2 parent-to-child edges,
+        # and this implementation places one checkpoint call on every edge.
+        logical_checkpoint_calls = 2 * num_layers - 2
 
     inputs = torch.randint(
         0,
@@ -240,8 +293,13 @@ def main() -> None:
     print(f"  Batch size:       {args.batch_size}")
     print(f"  Precision:        {args.mixed_precision}")
     print(f"  Optimizer:        {args.optimizer}")
-    print(f"  Checkpoints:      {args.num_checkpoints}")
-    print(f"  Group sizes:      {group_sizes}")
+    print(f"  Strategy:         {args.checkpoint_strategy}")
+    if args.checkpoint_strategy == "flat":
+        print(f"  Checkpoints:      {args.num_checkpoints}")
+        print(f"  Group sizes:      {group_sizes}")
+    else:
+        print(f"  Recursion depth:  {recursion_depth}")
+        print(f"  Logical calls:    {logical_checkpoint_calls}")
     print(f"  Warm-up steps:    {args.warmup_steps}")
     print(f"  Measured steps:   {args.measurement_steps}")
 
@@ -256,6 +314,7 @@ def main() -> None:
             optimizer,
             args.vocab_size,
             args.mixed_precision,
+            args.checkpoint_strategy,
         )
         torch.cuda.synchronize(device)
         print(f"Warm-up {warmup_idx + 1}/{args.warmup_steps} complete")
@@ -282,6 +341,7 @@ def main() -> None:
             optimizer,
             args.vocab_size,
             args.mixed_precision,
+            args.checkpoint_strategy,
         )
         torch.cuda.synchronize(device)
         elapsed_ms = (time.perf_counter() - start) * 1000
@@ -308,10 +368,17 @@ def main() -> None:
 
     output_path = args.output
     if output_path is None:
-        output_path = Path("results") / (
-            f"checkpoint_{args.model_size}_ctx{args.context_length}_"
-            f"n{args.num_checkpoints}_{args.mixed_precision}.csv"
-        )
+        if args.checkpoint_strategy == "flat":
+            output_name = (
+                f"checkpoint_{args.model_size}_ctx{args.context_length}_"
+                f"n{args.num_checkpoints}_{args.mixed_precision}.csv"
+            )
+        else:
+            output_name = (
+                f"checkpoint_{args.model_size}_ctx{args.context_length}_"
+                f"binary_nested_{args.mixed_precision}.csv"
+            )
+        output_path = Path("results") / output_name
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     row = {
@@ -321,8 +388,17 @@ def main() -> None:
         "batch_size": args.batch_size,
         "precision": args.mixed_precision,
         "optimizer": args.optimizer,
-        "num_checkpoints": args.num_checkpoints,
-        "group_sizes": "-".join(str(size) for size in group_sizes),
+        "checkpoint_strategy": args.checkpoint_strategy,
+        "num_checkpoints": (
+            args.num_checkpoints if args.checkpoint_strategy == "flat" else ""
+        ),
+        "group_sizes": (
+            "-".join(str(size) for size in group_sizes)
+            if args.checkpoint_strategy == "flat"
+            else "binary-recursive-to-1"
+        ),
+        "recursion_depth": recursion_depth,
+        "logical_checkpoint_calls": logical_checkpoint_calls,
         "warmup_steps": args.warmup_steps,
         "measurement_steps": args.measurement_steps,
         "mean_total_step_ms": mean_time_ms,
