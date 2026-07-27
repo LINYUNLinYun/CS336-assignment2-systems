@@ -232,6 +232,17 @@ if __name__ == "__main__":
         choices=["none", "bf16"],
         help="Mixed precision mode: none or bf16",
     )
+    parser.add_argument(
+        "--implementation",
+        choices=["eager", "compiled"],
+        default="eager",
+        help="Run the original Transformer or torch.compile(model).",
+    )
+    parser.add_argument(
+        "--annotate-attention",
+        action="store_true",
+        help="Replace attention with the NVTX-annotated implementation.",
+    )
     # 内存记录
     parser.add_argument(
         "--profile-memory",
@@ -250,8 +261,26 @@ if __name__ == "__main__":
 
     config = MODEL_CONFIGS[args.model_size]
 
-    # Monkey-patch the attention implementation before model construction.
-    cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+    if args.implementation == "compiled" and args.warmup_steps == 0:
+        raise ValueError(
+            "Compiled benchmarking requires at least one warm-up step so that "
+            "compilation time is excluded from the measurements."
+        )
+
+    # NVTX annotations are optional. For the normal torch.compile benchmark,
+    # keep the original attention implementation to avoid graph breaks caused
+    # by profiling ranges.
+    if args.annotate_attention:
+        cs336_basics.model.scaled_dot_product_attention = (
+            annotated_scaled_dot_product_attention
+        )
+
+    if args.implementation == "compiled" and args.annotate_blocks:
+        raise ValueError(
+            "--annotate-blocks is intended for eager Nsight profiling and "
+            "should not be combined with --implementation compiled."
+        )
+
     if args.annotate_blocks:
         TransformerBlock.forward = annotated_transformer_block_forward
 
@@ -261,6 +290,11 @@ if __name__ == "__main__":
         context_length=args.context_length,
         **config,
     ).to(device)
+
+    # Compile the complete Transformer exactly once. The selected execution
+    # path is warmed up before any measurements are collected.
+    if args.implementation == "compiled":
+        model = torch.compile(model)
     # backward hook
     if args.annotate_blocks:
         backward_hook_handles = []
@@ -310,6 +344,7 @@ if __name__ == "__main__":
     else:
         raise RuntimeError("invalid optimizer")
 
+    print(f"Implementation: {args.implementation}")
     print(f"Precision mode: {args.mixed_precision}")
     print(f"Warming up for {args.warmup_steps} steps...")
 
@@ -382,6 +417,7 @@ if __name__ == "__main__":
 
         records.append(
             {
+                "implementation": args.implementation,
                 "model": args.model_size,
                 "batch_size": args.batch_size,
                 "context_length": args.context_length,
@@ -402,7 +438,7 @@ if __name__ == "__main__":
     output_dir.mkdir(exist_ok=True)
 
     output_file = output_dir / (
-        f"{args.model_size}_{args.mode}_"
+        f"{args.model_size}_{args.implementation}_{args.mode}_"
         f"{args.mixed_precision}_warmup{args.warmup_steps}.csv"
     )
 

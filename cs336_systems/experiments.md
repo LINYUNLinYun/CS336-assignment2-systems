@@ -452,3 +452,148 @@ uv run python benchmark_checkpoint.py \
 
 如果进一步增加模型深度，**二分嵌套 checkpoint 的优势可能会更加明显，因为它可以将峰值显存降低到 O(log N)**
 
+
+## 4. GPU Kernels
+
+### 4.1 Optimizing Attention with FlashAttention-2
+#### 4.1.1 Benchmarking PyTorch Attention
+**Benchmark configuration**
+
+- GPU: NVIDIA GeForce RTX 4090
+- Dtype: FP32
+- Batch size: 8
+- Warm-up steps: 5
+- Measurement steps: 100
+- Attention type: single-head attention without an explicit head dimension
+
+| Batch | Seq Len | Head Dim | Forward (ms) | Backward (ms) | Memory Before Backward (MiB) | Forward Saved Delta (MiB) | Status |
+|---:|---:|---:|---:|---:|---:|---:|:---|
+| 8 | 256 | 16 | 0.204 ± 0.034 | 1.069 ± 0.069 | 20.90 | 4.27 | Success |
+| 8 | 1024 | 16 | 0.347 ± 0.101 | 1.150 ± 0.220 | 82.84 | 65.09 | Success |
+| 8 | 4096 | 16 | 7.339 ± 0.566 | 18.226 ± 0.125 | 1050.62 | 1028.38 | Success |
+| 8 | 8192 | 16 | 29.287 ± 4.574 | 71.787 ± 0.468 | 4133.00 | 4104.75 | Success |
+| 8 | 16384 | 16 | — | — | — | — | OOM |
+| 8 | 256 | 32 | 0.208 ± 0.034 | 0.725 ± 0.317 | 21.52 | 4.52 | Success |
+| 8 | 1024 | 32 | 0.341 ± 0.099 | 0.996 ± 0.195 | 85.34 | 66.09 | Success |
+| 8 | 4096 | 32 | 7.261 ± 0.430 | 18.130 ± 0.066 | 1060.62 | 1032.38 | Success |
+| 8 | 8192 | 32 | 28.677 ± 0.601 | 71.866 ± 0.303 | 4153.00 | 4112.75 | Success |
+| 8 | 16384 | 32 | — | — | — | — | OOM |
+| 8 | 256 | 64 | 0.206 ± 0.039 | 0.963 ± 0.250 | 22.77 | 5.02 | Success |
+| 8 | 1024 | 64 | 0.353 ± 0.163 | 1.086 ± 0.183 | 90.34 | 68.09 | Success |
+| 8 | 4096 | 64 | 7.313 ± 0.426 | 18.092 ± 0.257 | 1080.62 | 1040.38 | Success |
+| 8 | 8192 | 64 | 28.759 ± 0.564 | 71.428 ± 0.075 | 4193.00 | 4128.75 | Success |
+| 8 | 16384 | 64 | — | — | — | — | OOM |
+| 8 | 256 | 128 | 0.207 ± 0.031 | 0.623 ± 0.175 | 25.27 | 6.02 | Success |
+| 8 | 1024 | 128 | 0.370 ± 0.108 | 1.076 ± 0.136 | 100.34 | 72.09 | Success |
+| 8 | 4096 | 128 | 7.621 ± 0.388 | 18.515 ± 0.125 | 1120.62 | 1056.38 | Success |
+| 8 | 8192 | 128 | 30.043 ± 0.522 | 73.332 ± 0.600 | 4273.00 | 4160.75 | Success |
+| 8 | 16384 | 128 | — | — | — | — | OOM |
+
+
+> Depending on your GPU, some of these configurations are expected to run out of memory. Report the timings (or out-of-memory errors) you get for these configurations. At what size do you get out-of-memory errors?
+
+
+
+在16384的上下文长度下，无论head_dim是多少，都OOM了。其他数据正常。
+
+> Do the accounting for the memory usage of attention in one of the smallest configurations you find that runs out of memory (you can use the equations for memory usage of Transformers from Assignment 1).
+
+最小的OOM配置是batch=8, seq_len=16384, head_dim=16。attention 理论上需要显存：
+$$
+Q, K, V: 3 \times B \times L \times d_{head} \times 4\text{ bytes} \\
+= 3 \times 8 \times 16384 \times 16 \times 4 = 25,165,824\text{ bytes} \approx 24.0\text{ MiB}\\
+S = QK^\top: B \times L \times L\\
+= 8 \times 16384 \times 16384 \times 4 = 8589934592\text{ bytes} \approx 8192.0\text{ MiB} \\
+P = \text{softmax}(S): B \times L \times L \\
+= 8192.0\text{ MiB} \\
+O = PV: B \times L \times d_{head} \\
+= 8 \times 16384 \times 16 \times 4 = 8,388,608\text{ bytes} \approx 8.0\text{ MiB} \\
+\text{Total: } 24.0 + 8192.0 + 8192.0 + 8.0 = 16416.0\text{ MiB} \approx 16.0\text{ GiB}
+$$
+再加上一些梯度和临时张量，直接OOM。
+
+> How does the memory saved for backward change with the sequence length?
+
+观察Forward Saved Delta (MiB)可以发现大致呈一个二次增长。这是由注意力机制的特性决定。
+
+> What would you do to eliminate this memory cost?
+我没什么想法，用FlashAttention-2吧
+
+### 4.2 Benchmarking JIT-Compiled Attention
+
+实验设置：
+- Attention implementation: `torch.compile` compiled PyTorch attention
+- Forward 和 backward 分别单独 warm up，避免首次编译时间进入正式计时
+
+
+
+Compiled Attention 结果：
+
+| Seq. length | Head dim | Forward (ms) | Backward (ms) | Saved memory (MiB) | Status |
+|---:|---:|---:|---:|---:|:---|
+| 256 | 16 | 0.119 | 0.432 | 4.28 | Success |
+| 1024 | 16 | 0.211 | 0.741 | 65.13 | Success |
+| 4096 | 16 | 2.759 | 7.721 | 1028.50 | Success |
+| 8192 | 16 | 13.452 | 29.727 | 4105.00 | Success |
+| 16384 | 16 | — | — | — | OOM |
+| 256 | 32 | 0.136 | 0.361 | 4.53 | Success |
+| 1024 | 32 | 0.227 | 0.695 | 66.13 | Success |
+| 4096 | 32 | 3.618 | 7.976 | 1032.50 | Success |
+| 8192 | 32 | 14.856 | 32.391 | 4113.00 | Success |
+| 16384 | 32 | — | — | — | OOM |
+| 256 | 64 | 0.146 | 0.382 | 5.03 | Success |
+| 1024 | 64 | 0.293 | 0.633 | 68.13 | Success |
+| 4096 | 64 | 2.649 | 7.858 | 1040.50 | Success |
+| 8192 | 64 | 10.227 | 31.996 | 4129.00 | Success |
+| 16384 | 64 | — | — | — | OOM |
+| 256 | 128 | 0.144 | 0.545 | 6.03 | Success |
+| 1024 | 128 | 0.312 | 0.720 | 72.13 | Success |
+| 4096 | 128 | 2.959 | 8.288 | 1056.50 | Success |
+| 8192 | 128 | 11.516 | 33.827 | 4161.00 | Success |
+| 16384 | 128 | — | — | — | OOM |
+
+与 Eager Attention 的对比：
+
+以 `head_dim = 16` 为例：
+
+| Seq. length | Eager forward | Compiled forward | Forward speedup | Eager backward | Compiled backward | Backward speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| 256 | 0.204 ms | 0.119 ms | 1.71× | 1.069 ms | 0.432 ms | 2.47× |
+| 1024 | 0.347 ms | 0.211 ms | 1.65× | 1.150 ms | 0.741 ms | 1.55× |
+| 4096 | 7.339 ms | 2.759 ms | 2.66× | 18.226 ms | 7.721 ms | 2.36× |
+| 8192 | 29.287 ms | 13.452 ms | 2.18× | 71.787 ms | 29.727 ms | 2.42× |
+
+`torch.compile` 明显提升了 Attention 的 forward 和 backward 性能，长序列下通常能获得约 2× 以上的加速。例如，在 sequence length 为 8192、head dimension 为 16 时，forward 从 29.29 ms 降至 13.45 ms，backward 从 71.79 ms 降至 29.73 ms。
+
+但是，编译前后的显存占用几乎相同，并且两者在 sequence length 为 16384 时都会 OOM。说明 `torch.compile` 主要通过算子融合和更高效的 kernel 生成来提升执行速度，但没有改变普通 Attention 需要显式构造和保存 $N \times N$ 注意力矩阵的算法，因此其显存复杂度仍然是 $O(N^2)$。
+
+**Compiling the Entire Transformer：**
+
+对整个model编译，结果如下：
+| Model | Implementation | Forward only (ms) | Forward + backward (ms) | Full step (ms) |
+|---|---|---:|---:|---:|
+| Small | Eager | 24.286 | 79.742 | 94.317 |
+| Small | Compiled | 17.737 | 57.363 | 69.338 |
+| Medium | Eager | 73.405 | 229.481 | 269.130 |
+| Medium | Compiled | 52.752 | 159.434 | 198.155 |
+
+**Speedups：**
+
+| Model | Forward speedup | Forward + backward speedup | Full-step speedup |
+|---|---:|---:|---:|
+| Small | 1.37× | 1.39× | 1.36× |
+| Medium | 1.39× | 1.44× | 1.36× |
+
+**结论**：
+1. 无论small还是medium模型，`torch.compile` 都能带来约 1.36×~1.44× 的整体加速。
+2. 似乎在更大的模型上取得了更多的加速
+3. 对于optimizer阶段，几乎没有加速，因为编译只编译了model，optimizer是不属于编译后的计算图的范畴的。
+
+#### 4.2.1 Example - Weighted Sum
+以一个w eighted sum的例子来引入triton的概念，主要特点是：
+- 分块运算再合并
+- 多线程并行计算
+- 自己操作内存
+- 疑似要自己求导
+
+#### 4.2.2 FlashAttention-2 Forward Pass

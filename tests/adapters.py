@@ -13,8 +13,11 @@ def get_flashattention_autograd_function_pytorch() -> type:
     Returns:
         A class object (not an instance of the class)
     """
+    from cs336_systems.flash_attention import FlashAttentionPytorch
     # For example: return MyFlashAttnAutogradFunctionClass
-    raise NotImplementedError
+    # raise NotImplementedError
+    return FlashAttentionPytorch
+    # return fapytorch
 
 
 def get_flashattention_autograd_function_triton() -> type:
@@ -30,7 +33,9 @@ def get_flashattention_autograd_function_triton() -> type:
         A class object (not an instance of the class)
     """
     # For example: return MyTritonFlashAttentionAutogradFunctionClass
-    raise NotImplementedError
+    from cs336_systems.flash_attention import FlashAttention
+    return FlashAttention
+    # raise NotImplementedError
 
 
 def get_ddp(module: torch.nn.Module) -> torch.nn.Module:
