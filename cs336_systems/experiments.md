@@ -704,6 +704,15 @@ Compiled Attention 结果：
 
 ### 5.2 A Naïve Implementation of Distributed Data Parallel Training
 
+| 模型 | 数据大小 (MB) | Step 时间 (ms) | Comm 时间 (ms) | 通信占比 |
+|---|---|---|---|---|
+| Small | 1 | 160.941 | 79.782 | 49.57% |
+| Medium | 10 | ~393.994 | ~253.745 | ~64.4% |
+| Large | 100 | 810.823 | 565.727 | 69.77% |
+| XL | 1024 | OOM | OOM | — |
+
+
+
 ### 5.3 Improving Upon the Minimal DDP Implementation
 下面主要围绕这两方面：
 - 减少分布式训练的通信开销

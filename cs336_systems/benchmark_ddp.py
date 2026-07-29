@@ -11,7 +11,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.optim as optim
 
-from cs336_systems.ddp import NaiveDDP
+from ddp import NaiveDDP
 from cs336_basics.model import BasicsTransformerLM
 
 
