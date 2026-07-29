@@ -91,8 +91,8 @@ class FlashAttentionPytorch(torch.autograd.Function):
 
                     P_tile = torch.exp(S_tile - m_new[:,None ])         #还记得吗？减去最大值是为了数值稳定不然exp会爆
                     l_new = l*correction + P_tile.sum(dim=-1)
-                    O_new = O_tile*correction[:,None] + P_tile@v_tile       # 这里O也可以用同样的手段进行修正,o = p v
-
+                    P_cast = P_tile.to(v_tile.dtype)
+                    O_new = O_tile*correction[:,None] + P_cast.to(v_tile.dtype)@v_tile       # 这里O也可以用同样的手段进行修正,o = p 
                     # 更新
                     m = m_new
                     l = l_new
@@ -104,7 +104,7 @@ class FlashAttentionPytorch(torch.autograd.Function):
                 # L_i = m_i + log(l_i)
                 L_tile = m + torch.log(l)               # 这里加m是为了还原原来的分母而不是减去最大值的，用log存是为了数值稳定
 
-                O[batch_idx,q_start:q_end,:] = O_tile
+                O[batch_idx,q_start:q_end,:] = O_tile.to(Q.dtype)
                 L[batch_idx,q_start:q_end] = L_tile
         # 所有batch计算完
         ctx.save_for_backward(Q, K, V, O, L)
@@ -119,6 +119,7 @@ class FlashAttentionPytorch(torch.autograd.Function):
 
         grad_Q,grad_K,grad_V = _compiled_attention_backward(Q, K, V, O, L,grad_output,  is_causal)
         
+        
         return grad_Q,grad_K,grad_V,None,None,None
 
 
@@ -132,7 +133,7 @@ def flash_fwd_kernel(
     stride_ob, stride_oq, stride_od,
     stride_lb, stride_lq,
     N_QUERIES, N_KEYS,
-    scale,
+    scale: tl.constexpr,
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
@@ -201,7 +202,7 @@ def flash_fwd_kernel(
         K_tile = tl.load(K_block_ptr)
         V_tile = tl.load(V_block_ptr)
 
-        S_tile = tl.dot(Q_tile, tl.trans(K_tile))*scale
+        S_tile = tl.dot(Q_tile, tl.trans(K_tile),out_dtype=tl.float32,)*scale
 
         if is_causal:
             # 因果 
@@ -226,8 +227,9 @@ def flash_fwd_kernel(
 
         P_tile = tl.exp(S_tile - m_new[:, None])
         l_new = l*correction + P_tile.sum(axis = -1)
-
-        O_acc = tl.dot(P_tile,V_tile, acc=O_acc*correction[:,None]) 
+        P_cast = P_tile.to(V_tile.type.element_ty)
+        O_acc*=correction[:,None]
+        O_acc = tl.dot(P_cast,V_tile, acc=O_acc) 
 
         # 更新全局信息
         m = m_new
@@ -241,36 +243,37 @@ def flash_fwd_kernel(
     L_tile = m + tl.log(l)
 
     tl.store(O_block_ptr, O_acc.to(O_block_ptr.type.element_ty))
-    tl.store(L_block_ptr, L_tile.to(O_block_ptr.type.element_ty))
+    tl.store(L_block_ptr, L_tile)
 
     
 def _attention_backward( Q, K, V, O, L,grad_outputs,is_causal):
         B, N_q, h_dim = Q.shape
         _, N_k, h_dim = Q.shape
         scale = 1.0 / math.sqrt(h_dim)
-        S = Q @ K.transpose(-2,-1) *scale
+        S = (Q @ K.transpose(-2,-1)).to(torch.float32) *scale
         if is_causal:
             # 这里不能用上三角矩阵构造因为不是方阵
             q_idx = torch.arange(N_q, device=Q.device)[:, None]   # (N_q, 1)
             k_idx = torch.arange(N_k, device=Q.device)[None, :]   # (1, N_k)
             mask = q_idx < k_idx                                    # (N_q, N_k)
-            S = S + mask * (-1e6)
+            # S = S + mask * (-1e6)
             S += mask*-1e6
 
         P = torch.exp(S - L.unsqueeze(-1))
-        grad_V = P.transpose(-2,-1) @ grad_outputs
-        grad_P = grad_outputs @ V.transpose(-2,-1)
+        grad_V = P.to(grad_outputs.dtype).transpose(-2,-1) @ grad_outputs
+        grad_P = (grad_outputs @ V.transpose(-2,-1)).float()
 
         D = (O* grad_outputs).sum(dim=-1)       # 逐元素相乘
         grad_S = P*(grad_P - D.unsqueeze(-1))
-        grad_Q = grad_S @ K *scale
-        grad_K = grad_S.transpose(-2,-1) @ Q *scale
+        grad_Q = (grad_S.to(K.dtype) @ K).float() * scale
+        grad_K = (grad_S.to(Q.dtype).transpose(-2, -1) @ Q).float() * scale
 
         return grad_Q,grad_K,grad_V
 
 _compiled_attention_backward = torch.compile(_attention_backward)
 
 class FlashAttention(torch.autograd.Function):
+    @staticmethod
     def forward(ctx, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, 
                 is_causal=False,Q_TILE_SIZE=16,K_TILE_SIZE=16,):
         B, N_q, D = Q.shape
@@ -288,7 +291,7 @@ class FlashAttention(torch.autograd.Function):
             V.stride(0),V.stride(1),V.stride(2),
             O.stride(0),O.stride(1),O.stride(2),
             L.stride(0),L.stride(1),
-            N_q,N_k,tl.constexpr(1.0 / math.sqrt(D)),D,Q_TILE_SIZE,K_TILE_SIZE,is_causal)
+            N_q,N_k,1.0 / math.sqrt(D),D,Q_TILE_SIZE,K_TILE_SIZE,is_causal)
 
         # 所有batch计算完
         ctx.save_for_backward(Q, K, V, O, L)
