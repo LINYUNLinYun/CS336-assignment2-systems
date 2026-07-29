@@ -1,17 +1,18 @@
-import time
-import torch
+from __future__ import annotations
+
+import argparse
 import os
+import time
+from pathlib import Path
+
+import pandas as pd
+import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.optim as optim
 
 from cs336_systems.ddp import NaiveDDP
-from cs336_basics.model import BasicsTransformerLM   # 改成你的模型
-
-
-############################################################
-# Configuration
-############################################################
+from cs336_basics.model import BasicsTransformerLM
 
 
 MODEL_CONFIGS = {
@@ -46,23 +47,10 @@ MODEL_CONFIGS = {
         "num_heads": 36,
     },
 }
-config = MODEL_CONFIGS["medium"]
 
 
-
-BATCH_SIZE = 8
-CONTEXT_LENGTH = 512
-
-VOCAB_SIZE = 10000
-
-NUM_WARMUP = 10
-NUM_ITERS = 50
-
-WORLD_SIZE =2
-
-
-def benchmark(rank, world_size):
-
+def benchmark(rank: int, args: argparse.Namespace):
+    world_size = args.world_size
 
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = "29500"
@@ -76,95 +64,77 @@ def benchmark(rank, world_size):
     torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}")
 
+    dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[args.dtype]
+    config = MODEL_CONFIGS[args.model_size]
+
     model = BasicsTransformerLM(
-        vocab_size=VOCAB_SIZE,
-        context_length=CONTEXT_LENGTH,
-        **config
-        
-    ).to(device)
+        vocab_size=args.vocab_size,
+        context_length=args.context_length,
+        **config,
+    ).to(device=device, dtype=dtype)
 
     model = NaiveDDP(model)
+
+    if args.compile:
+        model = torch.compile(model)
 
     optimizer = optim.AdamW(
         model.parameters(),
         lr=3e-4,
     )
 
-
     x = torch.randint(
-        VOCAB_SIZE,
-        (BATCH_SIZE, CONTEXT_LENGTH),
+        args.vocab_size,
+        (args.batch_size, args.context_length),
         device=device,
     )
 
     y = torch.randint(
-        VOCAB_SIZE,
-        (BATCH_SIZE, CONTEXT_LENGTH),
+        args.vocab_size,
+        (args.batch_size, args.context_length),
         device=device,
     )
 
-    step_times = []
-    comm_times = []
+    step_times: list[float] = []
+    comm_times: list[float] = []
 
-    for it in range(NUM_WARMUP + NUM_ITERS):
+    for it in range(args.warmup_steps + args.measurement_steps):
 
         optimizer.zero_grad(set_to_none=True)
 
-        ####################################################
-        # Total step timer
-        ####################################################
-
         step_start = torch.cuda.Event(enable_timing=True)
         step_end = torch.cuda.Event(enable_timing=True)
-
-        ####################################################
-        # Communication timer
-        ####################################################
-
         comm_start = torch.cuda.Event(enable_timing=True)
         comm_end = torch.cuda.Event(enable_timing=True)
 
         step_start.record()
 
         logits = model(x)
-
         loss = torch.nn.functional.cross_entropy(
-            logits.view(-1, VOCAB_SIZE),
+            logits.view(-1, args.vocab_size),
             y.view(-1),
         )
-
         loss.backward()
 
-        ####################################################
-        # Communication
-        ####################################################
-
+        # torch.cuda.synchronize()
         comm_start.record()
-
-        model.synchronize_gradients()
-
+        if args.flat:
+            model.synchronize_gradients_flat
+        else:
+            model.synchronize_gradients()
         comm_end.record()
 
         optimizer.step()
 
         step_end.record()
-
         torch.cuda.synchronize()
 
-        if it >= NUM_WARMUP:
-
-            step_times.append(
-                step_start.elapsed_time(step_end)
-            )
-
-            comm_times.append(
-                comm_start.elapsed_time(comm_end)
-            )
+        if it >= args.warmup_steps:
+            step_times.append(step_start.elapsed_time(step_end))
+            comm_times.append(comm_start.elapsed_time(comm_end))
 
     if rank == 0:
-
         avg_step = sum(step_times) / len(step_times)
-
         avg_comm = sum(comm_times) / len(comm_times)
 
         print("=" * 60)
@@ -173,13 +143,69 @@ def benchmark(rank, world_size):
         print(f"Communication ratio : {100 * avg_comm / avg_step:.2f}%")
         print("=" * 60)
 
+        df = pd.DataFrame({
+            "model": [args.model_size],
+            "batch_size": [args.batch_size],
+            "context_length": [args.context_length],
+            "vocab_size": [args.vocab_size],
+            "dtype": [args.dtype],
+            "compile": [args.compile],
+            "step_ms": [avg_step],
+            "comm_ms": [avg_comm],
+            "comm_ratio": [avg_comm / avg_step],
+        })
+
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = args.output_dir / f"{args.model_size}_ddp.csv"
+        df.to_csv(output_path, index=False)
+        print(f"Saved to {output_path}")
+
     dist.destroy_process_group()
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Benchmark the CS336 DDP")
+
+    parser.add_argument("--world-size", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--context-length", type=int, default=512)
+    parser.add_argument("--vocab-size", type=int, default=10000)
+    parser.add_argument("--measurement-steps", type=int, default=50)
+    parser.add_argument("--warmup-steps", type=int, default=10)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("results/ddp"),
+    )
+    parser.add_argument(
+        "--model-size",
+        choices=("xl", "medium", "large", "small"),
+        default="xl",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=("fp32", "bf16"),
+        default="bf16",
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+    )
+    parser.add_argument(
+            "--flat",
+            action="store_true",
+        )
+    
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_args()
+    world_size = args.world_size
 
     mp.spawn(
         benchmark,
-        args=(WORLD_SIZE,),
-        nprocs=WORLD_SIZE,
+        args=(args,),
+        nprocs=world_size,
         join=True,
     )

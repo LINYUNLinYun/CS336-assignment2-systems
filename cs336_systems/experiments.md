@@ -703,3 +703,31 @@ Compiled Attention 结果：
 
 
 ### 5.2 A Naïve Implementation of Distributed Data Parallel Training
+
+### 5.3 Improving Upon the Minimal DDP Implementation
+下面主要围绕这两方面：
+- 减少分布式训练的通信开销
+- 反向传播的过程重叠通信开销
+
+#### 5.3.1 Reducing the Number of Communication Calls
+常规 DDP vs Flatten DDP 对比（2 卡）：
+
+| 模型 | 方式 | Step 时间 (ms) | Comm 时间 (ms) | 通信占比 |
+|---|---|---|---|---|
+| Small | 常规 | 160.941 | 79.782 | 49.57% |
+| | `--flat` | 72.273 | 0.029 | 0.04% |
+| | **加速比** | **2.23×** | **2751×** | — |
+| Medium | 常规 | 393.994¹ | 253.745¹ | ~64.4% |
+| | `--flat` | 132.146 | 0.020 | 0.02% |
+| | **加速比** | **2.98×** | **12687×** | — |
+| Large | 常规 | 810.823 | 565.727 | 69.77% |
+| | `--flat` | 246.767 | 0.002 | 0.00% |
+| | **加速比** | **3.29×** | **282864×** | — |
+| XL | 常规 | OOM | OOM | — |
+| | `--flat` | OOM | OOM | — |
+
+> ¹：Medium 常规三次实验的平均值。
+
+不难看出，Flatten DDP 在通信上几乎消除了开销，原来的每个para就通信一次确实很不合理
+
+#### 5.3.2 Overlapping Computation with Communication of Individual Parameter Gradients

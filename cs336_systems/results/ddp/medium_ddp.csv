@@ -1,0 +1,2 @@
+model,batch_size,context_length,vocab_size,dtype,compile,step_ms,comm_ms,comm_ratio
+medium,4,512,10000,bf16,False,132.14567489624022,0.020406400226056574,0.00015442351966554732
