@@ -46,7 +46,7 @@ MODEL_CONFIGS = {
         "num_heads": 36,
     },
 }
-config = MODEL_CONFIGS["xl"]
+config = MODEL_CONFIGS["medium"]
 
 
 
