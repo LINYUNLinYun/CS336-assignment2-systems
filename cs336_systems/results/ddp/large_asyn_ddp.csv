@@ -1,0 +1,2 @@
+model,mode,batch_size,context_length,vocab_size,dtype,compile,nsys,step_ms,comm_ms,comm_ratio
+large,asyn,4,512,10000,bf16,False,True,762.3836999511718,11.474068489074707,0.015050254209015202

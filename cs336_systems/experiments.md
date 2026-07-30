@@ -704,22 +704,6 @@ Compiled Attention 结果：
 
 ### 5.2 A Naïve Implementation of Distributed Data Parallel Training
 
-| 模型 | 数据大小 (MB) | Step 时间 (ms) | Comm 时间 (ms) | 通信占比 |
-|---|---|---|---|---|
-| Small | 1 | 160.941 | 79.782 | 49.57% |
-| Medium | 10 | ~393.994 | ~253.745 | ~64.4% |
-| Large | 100 | 810.823 | 565.727 | 69.77% |
-| XL | 1024 | OOM | OOM | — |
-
-
-
-### 5.3 Improving Upon the Minimal DDP Implementation
-下面主要围绕这两方面：
-- 减少分布式训练的通信开销
-- 反向传播的过程重叠通信开销
-
-#### 5.3.1 Reducing the Number of Communication Calls
-常规 DDP vs Flatten DDP 对比（2 卡）：
 
 | 模型 | 方式 | Step 时间 (ms) | Comm 时间 (ms) | 通信占比 |
 |---|---|---|---|---|
@@ -732,11 +716,43 @@ Compiled Attention 结果：
 | Large | 常规 | 810.823 | 565.727 | 69.77% |
 | | `--flat` | 246.767 | 0.002 | 0.00% |
 | | **加速比** | **3.29×** | **282864×** | — |
-| XL | 常规 | OOM | OOM | — |
-| | `--flat` | OOM | OOM | — |
+| XL | 常规 | 619.623 | 285.591 | 46.09% |
+| | `--flat` | 333.284 | 0.000 | 0.00% |
 
-> ¹：Medium 常规三次实验的平均值。
+
+> 备注：前三个模型是4090跑的，xl是pro6000跑的，因为xl跑这个配置大概要40G显存
+
+
+### 5.3 Improving Upon the Minimal DDP Implementation
+下面主要围绕这两方面：
+- 减少分布式训练的通信开销
+- 反向传播的过程重叠通信开销
+
+#### 5.3.1 Reducing the Number of Communication Calls
+常规 DDP vs Flatten DDP 对比（2 卡）参考上表
 
 不难看出，Flatten DDP 在通信上几乎消除了开销，原来的每个para就通信一次确实很不合理
 
 #### 5.3.2 Overlapping Computation with Communication of Individual Parameter Gradients
+
+| 模型 | 模式 | 平均 Step 时间 (ms) | 平均 Comm / Wait 时间 (ms) | 占 Step 比例 |
+|---|---|---:|---:|---:|
+| **Small** | Sync | 165.948 | 83.980 | 50.61% |
+| **Small** | Flat | 157.667 | 80.203 | 50.87% |
+| **Small** | Async Overlap | 121.805 | 2.258 | 1.85% |
+| **Medium** | Sync | 399.383 | 261.129 | 65.38% |
+| **Medium** | Flat | 372.276 | 236.222 | 63.45% |
+| **Medium** | Async Overlap | 347.389 | 4.105 | 1.18% |
+| **Large** | Sync | 829.218 | 580.462 | 70.00% |
+| **Large** | Flat | 800.443 | 551.651 | 68.92% |
+| **Large** | Async Overlap | 714.266 | 6.642 | 0.93% |
+
+> ¹：Medium 常规三次实验的平均值。
+
+接下来是我的nsys分析，也很简单，就是改造下benchmark_ddp.py，加入nsys profile的装饰器，然后同步和异步的情况跑一下4090+large，由于异步主要通信主要发生在反向传播阶段所以下面直接打开某个iteration然后看它的bwd就行了，下面是截图：
+
+同步情况下的，可以看到，all-reduce发生在bwd后，bwd阶段的kernal都是计算相关的：
+![alt text](image-3.png)
+
+异步情况的，可以看到，每个param都有一个all-reduce，和其他的计算的stream并行：
+![alt text](image-4.png)
