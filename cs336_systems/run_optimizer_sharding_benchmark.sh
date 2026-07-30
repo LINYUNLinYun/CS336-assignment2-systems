@@ -15,7 +15,7 @@ run() {
   "$SCRIPT" \
   "$@" \
   --ddp "$DDP_IMPL" \
-  --model-size small
+  --model-size xl
 }
 
 run --task memory --optimizer baseline
