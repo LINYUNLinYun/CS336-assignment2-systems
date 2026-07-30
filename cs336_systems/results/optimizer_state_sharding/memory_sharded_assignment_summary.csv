@@ -1,0 +1,4 @@
+checkpoint,current_allocated_mib,peak_allocated_mib,current_reserved_mib,peak_reserved_mib,parameter_mib,gradient_mib,optimizer_state_mib,buffer_mib,input_and_target_mib,unattributed_current_mib
+after_model_initialization,492.19873046875,492.19921875,542.0,542.0,490.6669921875,0.0,0.0,0.125,0.0,1.40673828125
+directly_before_optimizer_step,1006.89697265625,4149.42626953125,4288.0,4288.0,490.6669921875,490.6669921875,0.0,0.125,0.03125,25.40673828125
+directly_after_optimizer_step,1558.35791015625,4149.42626953125,4288.0,4288.0,490.6669921875,490.6669921875,549.2578125,0.125,0.03125,27.60986328125

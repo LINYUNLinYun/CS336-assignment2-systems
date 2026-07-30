@@ -756,3 +756,10 @@ Compiled Attention 结果：
 
 异步情况的，可以看到，每个param都有一个all-reduce，和其他的计算的stream并行：
 ![alt text](image-4.png)
+
+
+## 6 Optimizer State Sharding
+这一章主要讲优化器分片。
+
+## 7 Fully-Sharded Data Parallel
+

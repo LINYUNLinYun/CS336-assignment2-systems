@@ -1,0 +1,34 @@
+{
+  "metadata": {
+    "task": "timing",
+    "optimizer": "baseline",
+    "ddp": "assignment",
+    "rank": 1,
+    "world_size": 2,
+    "device": "cuda:1",
+    "gpu_name": "NVIDIA GeForce RTX 4090",
+    "batch_size_per_rank": 4,
+    "context_length": 512,
+    "vocab_size": 10000,
+    "d_model": 768,
+    "d_ff": 3072,
+    "num_layers": 12,
+    "num_heads": 12,
+    "autocast_bf16": false,
+    "adamw_foreach": false,
+    "lr": 0.0001,
+    "weight_decay": 0.1
+  },
+  "step_times_ms": [
+    201.13085955381393,
+    215.7178297638893,
+    198.80104437470436,
+    204.17362451553345,
+    212.5805765390396,
+    214.94786068797112,
+    214.0960358083248,
+    207.1341797709465,
+    211.0462263226509,
+    214.3118530511856
+  ]
+}

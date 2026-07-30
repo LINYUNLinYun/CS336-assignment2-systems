@@ -1,0 +1,66 @@
+{
+  "metadata": {
+    "task": "memory",
+    "optimizer": "sharded",
+    "ddp": "assignment",
+    "rank": 0,
+    "world_size": 2,
+    "device": "cuda:0",
+    "gpu_name": "NVIDIA GeForce RTX 4090",
+    "batch_size_per_rank": 4,
+    "context_length": 512,
+    "vocab_size": 10000,
+    "d_model": 768,
+    "d_ff": 3072,
+    "num_layers": 12,
+    "num_heads": 12,
+    "autocast_bf16": false,
+    "adamw_foreach": false,
+    "lr": 0.0001,
+    "weight_decay": 0.1
+  },
+  "records": [
+    {
+      "rank": 0,
+      "checkpoint": "after_model_initialization",
+      "current_allocated_mib": 492.19873046875,
+      "peak_allocated_mib": 492.19921875,
+      "current_reserved_mib": 542.0,
+      "peak_reserved_mib": 542.0,
+      "parameter_mib": 490.6669921875,
+      "gradient_mib": 0.0,
+      "optimizer_state_mib": 0.0,
+      "buffer_mib": 0.125,
+      "input_and_target_mib": 0.0,
+      "unattributed_current_mib": 1.40673828125
+    },
+    {
+      "rank": 0,
+      "checkpoint": "directly_before_optimizer_step",
+      "current_allocated_mib": 1006.89697265625,
+      "peak_allocated_mib": 4149.42626953125,
+      "current_reserved_mib": 4288.0,
+      "peak_reserved_mib": 4288.0,
+      "parameter_mib": 490.6669921875,
+      "gradient_mib": 490.6669921875,
+      "optimizer_state_mib": 0.0,
+      "buffer_mib": 0.125,
+      "input_and_target_mib": 0.03125,
+      "unattributed_current_mib": 25.40673828125
+    },
+    {
+      "rank": 0,
+      "checkpoint": "directly_after_optimizer_step",
+      "current_allocated_mib": 1558.35791015625,
+      "peak_allocated_mib": 4149.42626953125,
+      "current_reserved_mib": 4288.0,
+      "peak_reserved_mib": 4288.0,
+      "parameter_mib": 490.6669921875,
+      "gradient_mib": 490.6669921875,
+      "optimizer_state_mib": 549.2578125,
+      "buffer_mib": 0.125,
+      "input_and_target_mib": 0.03125,
+      "unattributed_current_mib": 27.60986328125
+    }
+  ]
+}
