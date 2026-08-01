@@ -2,12 +2,13 @@
 set -euo pipefail
 
 # Run from the CS336 assignment repository root after copying
-# benchmark_fsdp_accounting.py into cs336_systems/.
+# benchmark_fsdp.py into cs336_systems/.
 
 OUT_DIR="${OUT_DIR:-results/fsdp_accounting}"
 DTYPE="${DTYPE:-fp16}"
 GPUS="${CUDA_VISIBLE_DEVICES:-0,1}"
-REPORT="${OUT_DIR}/fsdp_xl_${DTYPE}"
+MODEL="${MODEL:-xl}"
+REPORT="${OUT_DIR}/fsdp_${MODEL}_${DTYPE}"
 
 mkdir -p "${OUT_DIR}"
 export CUDA_VISIBLE_DEVICES="${GPUS}"
@@ -25,13 +26,14 @@ uv run nsys profile \
   --force-overwrite=true \
   --output="${REPORT}" \
   -- torchrun --standalone --nproc_per_node=2 \
-    cs336_systems/benchmark_fsdp_accounting.py \
+    benchmark_fsdp.py \
     --compute-dtype "${DTYPE}" \
     --global-batch-size 4 \
     --context-length 512 \
     --warmup-steps 3 \
     --measurement-steps 10 \
-    --output-dir "${OUT_DIR}"
+    --output-dir "${OUT_DIR}" \
+    --model-size "${MODEL}" \
 
 echo
 echo "Nsight report: ${REPORT}.nsys-rep"

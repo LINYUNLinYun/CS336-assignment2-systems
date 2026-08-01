@@ -797,4 +797,6 @@ Compiled Attention 结果：
 - 通信量上，我的理论上比zero多了50%的通信量（好像环状通信公式可算，问gpt即可）。我的 DDP 使用all-reduce，会把完整梯度同步到了所有rank，但每个 rank 实际只需要自己负责参数对应的那部分梯度。ZeRO Stage 1 通过 reduce-scatter 避免了这次多余的“梯度 all-gather”。
 
 ## 7 Fully-Sharded Data Parallel
+根据第 6 节的测量结果，两卡 FSDP 会在优化器状态分片的基础上，进一步将模型参数和梯度各分摊到两张 GPU，因此每张 GPU 预计还能节省约 12,995.9 MiB 显存。忽略 all-gather 临时缓冲区后，峰值显存预计从 52,430.3 MiB 降至约 28,122.8 MiB，也就是节省约 24,307.5 MiB（23.74 GiB），降幅约 46.36%。
 
+在两张 RTX 4090 上，XL 模型采用全局 batch size 4、context length 512 和 FP16 权重通信时，单次前向传播平均耗时为 1170.83 ms，标准差为 30.29 ms，中位数为 1173.14 ms。 从 Nsight 时间线可以观察每层的 NCCL all-gather 是否在对应层的 FSDP_ACQUIRE 和首个 GEMM 开始前完成；

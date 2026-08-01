@@ -82,7 +82,7 @@ CONFIG = {
     "num_heads": 32,
 }
 
-# CONFIG = 
+COMPUTE_DTYPE = "fp32"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -153,6 +153,9 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     CONFIG.update(**MODEL_CONFIGS[args.model_size])
+    
+    global COMPUTE_DTYPE 
+    COMPUTE_DTYPE= dtype_from_name(args.compute_dtype)
 
     if args.global_batch_size <= 0:
         parser.error("--global-batch-size must be positive")
@@ -376,11 +379,15 @@ def build_model(
     return fsdp_model, input_ids, labels, compute_dtype
 
 
-def forward_once(model: nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
+def forward_once(model: nn.Module, input_ids: torch.Tensor,compute_dtype: torch.dtype | None,) -> torch.Tensor:
     # Keep autograd enabled so this is a training-mode forward profile. The
     # graph is released when the returned logits are deleted.
     with nvtx.range("FSDP_FORWARD"):
-        return model(input_ids)
+        if compute_dtype is None:
+            return model(input_ids)
+        with torch.autocast(device_type="cuda",dtype=compute_dtype,):
+            return model(input_ids)
+
 
 
 def warm_up(
@@ -391,7 +398,7 @@ def warm_up(
 ) -> None:
     for step in range(steps):
         with nvtx.range(f"WARMUP_STEP[{step}]"):
-            logits = forward_once(model, input_ids)
+            logits = forward_once(model, input_ids,compute_dtype=COMPUTE_DTYPE)
         del logits
         torch.cuda.synchronize(device)
     dist.barrier()
@@ -410,7 +417,7 @@ def time_forward_passes(
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         with nvtx.range(f"TIMED_FORWARD[{step}]"):
-            logits = forward_once(model, input_ids)
+            logits = forward_once(model, input_ids,compute_dtype=COMPUTE_DTYPE)
         end.record()
         end.synchronize()
         times_ms.append(float(start.elapsed_time(end)))
@@ -470,7 +477,7 @@ def run_profile_step(
     try:
         # Ensure both ranks have opened the capture range before GPU work starts.
         dist.barrier()
-        logits = forward_once(model, input_ids)
+        logits = forward_once(model, input_ids,compute_dtype=COMPUTE_DTYPE)
         torch.cuda.synchronize(device)
         del logits
         # Keep both capture ranges open until both ranks have completed.
