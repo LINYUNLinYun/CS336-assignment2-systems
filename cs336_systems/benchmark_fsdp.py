@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-Run with exactly two GPUs. The script:
-  1. builds the assignment's XL model (vocab=10k, global batch=4, context=512),
-  2. wraps it with tests.adapters.get_fsdp,
-  3. times forward passes on both ranks,
-  4. emits NVTX ranges that make weight prefetch, weight acquire, and each
-     sharded layer easy to identify in Nsight Systems,
-  5. prints the Section 6 -> FSDP peak-memory estimate using the measurements
-     supplied on the command line.
+Run with exactly two GPUs. The script supports two comparable modes:
 
-Typical timing run:
+  baseline:
+      A complete model replica on each GPU, with no FSDP communication.
+
+  fsdp:
+      The educational FSDP implementation, including weight all-gathers.
+
+Both modes use the same model, local batch size, inputs, autocast dtype,
+warm-up count, and timing method. Run each mode in a separate torchrun process
+to avoid CUDA allocator/cache effects contaminating the comparison.
+
+Examples:
   uv run torchrun --standalone --nproc_per_node=2 \
-      cs336_systems/benchmark_fsdp_accounting.py \
-      --compute-dtype fp16
+      cs336_systems/benchmark_fsdp_compare.py \
+      --mode baseline --compute-dtype fp16 --skip-profile-step
 
-For an Nsight capture, use the companion run_fsdp_accounting.sh script.
+  uv run torchrun --standalone --nproc_per_node=2 \
+      cs336_systems/benchmark_fsdp_compare.py \
+      --mode fsdp --compute-dtype fp16 --skip-profile-step
 """
 
 from __future__ import annotations
@@ -82,11 +87,19 @@ CONFIG = {
     "num_heads": 32,
 }
 
-COMPUTE_DTYPE = "fp32"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Profile XL FSDP forward all-gathers on two GPUs."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("baseline", "fsdp"),
+        default="fsdp",
+        help=(
+            "baseline keeps a complete model replica on each rank; "
+            "fsdp wraps the model with the assignment FSDP implementation."
+        ),
     )
     parser.add_argument(
         "--compute-dtype",
@@ -154,9 +167,6 @@ def parse_args() -> argparse.Namespace:
 
     CONFIG.update(**MODEL_CONFIGS[args.model_size])
     
-    global COMPUTE_DTYPE 
-    COMPUTE_DTYPE= dtype_from_name(args.compute_dtype)
-
     if args.global_batch_size <= 0:
         parser.error("--global-batch-size must be positive")
     if not 1 <= args.context_length <= CONFIG["context_length"]:
@@ -303,6 +313,7 @@ def write_layer_metadata(
     output_dir: Path,
     rank: int,
     world_size: int,
+    model_size: str,
 ) -> None:
     """Write per-layer weight and communication sizes for the write-up."""
     if rank != 0:
@@ -332,13 +343,13 @@ def write_layer_metadata(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "fsdp_xl_layer_communication.csv"
+    csv_path = output_dir / f"fsdp_{model_size}_layer_communication.csv"
     with csv_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
         writer.writeheader()
         writer.writerows(rows)
 
-    json_path = output_dir / "fsdp_xl_layer_communication.json"
+    json_path = output_dir / f"fsdp_{model_size}_layer_communication.json"
     json_path.write_text(json.dumps(rows, indent=2))
     print(f"Layer communication metadata: {csv_path}")
 
@@ -348,7 +359,8 @@ def build_model(
     device: torch.device,
     rank: int,
 ) -> tuple[nn.Module, torch.Tensor, dict[int, str], torch.dtype | None]:
-    # Identical seed on every rank makes the initial full model identical.
+    """Build either the full-replica baseline or the FSDP model."""
+    # Identical seeds make model initialization identical across ranks/modes.
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
@@ -357,13 +369,18 @@ def build_model(
     base_model = BasicsTransformerLM(**config).to(device)
 
     compute_dtype = dtype_from_name(args.compute_dtype)
-    fsdp_model = get_fsdp(base_model, compute_dtype=compute_dtype)
-    labels = instrument_fsdp_with_nvtx(fsdp_model)
+    labels: dict[int, str] = {}
 
-    # Release temporary full-weight storages left over from construction.
-    del base_model
-    gc.collect()
-    torch.cuda.empty_cache()
+    if args.mode == "fsdp":
+        model = get_fsdp(base_model, compute_dtype=compute_dtype)
+        labels = instrument_fsdp_with_nvtx(model)
+
+        # The wrapper owns the model now; remove the extra Python reference.
+        del base_model
+        gc.collect()
+        torch.cuda.empty_cache()
+    else:
+        model = base_model
 
     local_batch_size = args.global_batch_size // dist.get_world_size()
     generator = torch.Generator(device=device)
@@ -376,18 +393,21 @@ def build_model(
         generator=generator,
     )
 
-    return fsdp_model, input_ids, labels, compute_dtype
+    return model, input_ids, labels, compute_dtype
 
-
-def forward_once(model: nn.Module, input_ids: torch.Tensor,compute_dtype: torch.dtype | None,) -> torch.Tensor:
-    # Keep autograd enabled so this is a training-mode forward profile. The
-    # graph is released when the returned logits are deleted.
-    with nvtx.range("FSDP_FORWARD"):
+def forward_once(
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    compute_dtype: torch.dtype | None,
+    mode: str,
+) -> torch.Tensor:
+    """Run one training-mode forward under identical autocast settings."""
+    range_name = "FSDP_FORWARD" if mode == "fsdp" else "BASELINE_FORWARD"
+    with nvtx.range(range_name):
         if compute_dtype is None:
             return model(input_ids)
-        with torch.autocast(device_type="cuda",dtype=compute_dtype,):
+        with torch.autocast(device_type="cuda", dtype=compute_dtype):
             return model(input_ids)
-
 
 
 def warm_up(
@@ -395,10 +415,12 @@ def warm_up(
     input_ids: torch.Tensor,
     steps: int,
     device: torch.device,
+    compute_dtype: torch.dtype | None,
+    mode: str,
 ) -> None:
     for step in range(steps):
         with nvtx.range(f"WARMUP_STEP[{step}]"):
-            logits = forward_once(model, input_ids,compute_dtype=COMPUTE_DTYPE)
+            logits = forward_once(model, input_ids, compute_dtype, mode)
         del logits
         torch.cuda.synchronize(device)
     dist.barrier()
@@ -409,6 +431,8 @@ def time_forward_passes(
     input_ids: torch.Tensor,
     steps: int,
     device: torch.device,
+    compute_dtype: torch.dtype | None,
+    mode: str,
 ) -> list[float]:
     times_ms: list[float] = []
     for step in range(steps):
@@ -417,14 +441,13 @@ def time_forward_passes(
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         with nvtx.range(f"TIMED_FORWARD[{step}]"):
-            logits = forward_once(model, input_ids,compute_dtype=COMPUTE_DTYPE)
+            logits = forward_once(model, input_ids, compute_dtype, mode)
         end.record()
         end.synchronize()
         times_ms.append(float(start.elapsed_time(end)))
         del logits
     dist.barrier()
     return times_ms
-
 
 def gather_timing_results(
     local_times_ms: list[float],
@@ -464,23 +487,19 @@ def run_profile_step(
     model: nn.Module,
     input_ids: torch.Tensor,
     device: torch.device,
+    compute_dtype: torch.dtype | None,
+    mode: str,
 ) -> tuple[float, float]:
-    """
-    Run exactly one capture step. Internal barriers ensure both ranks keep the
-    PROFILE_STEP range open for the same interval, which is important when
-    Nsight's NVTX capture-range mode profiles the torchrun process tree.
-    """
+    """Run one NVTX-captured forward step on both ranks."""
     dist.barrier()
     torch.cuda.reset_peak_memory_stats(device)
 
     nvtx.range_push("PROFILE_STEP")
     try:
-        # Ensure both ranks have opened the capture range before GPU work starts.
         dist.barrier()
-        logits = forward_once(model, input_ids,compute_dtype=COMPUTE_DTYPE)
+        logits = forward_once(model, input_ids, compute_dtype, mode)
         torch.cuda.synchronize(device)
         del logits
-        # Keep both capture ranges open until both ranks have completed.
         dist.barrier()
     finally:
         nvtx.range_pop()
@@ -489,7 +508,6 @@ def run_profile_step(
     peak_allocated_mib = mib(torch.cuda.max_memory_allocated(device))
     peak_reserved_mib = mib(torch.cuda.max_memory_reserved(device))
     return peak_allocated_mib, peak_reserved_mib
-
 
 def print_memory_accounting(args: argparse.Namespace) -> dict[str, float]:
     """
@@ -549,7 +567,7 @@ def main() -> None:
 
         if rank == 0:
             print(
-                "FSDP XL benchmark: "
+                f"{args.mode.upper()} {args.model_size.upper()} benchmark: "
                 f"GPU={torch.cuda.get_device_name(local_rank)}, "
                 f"world_size={world_size}, global_batch={args.global_batch_size}, "
                 f"local_batch={args.global_batch_size // world_size}, "
@@ -562,33 +580,52 @@ def main() -> None:
         synchronize(device)
 
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        write_layer_metadata(
-            model,
-            labels,
-            compute_dtype,
-            args.output_dir,
-            rank,
-            world_size,
-        )
+        if args.mode == "fsdp":
+            write_layer_metadata(
+                model,
+                labels,
+                compute_dtype,
+                args.output_dir,
+                rank,
+                world_size,
+                args.model_size,
+            )
 
-        warm_up(model, input_ids, args.warmup_steps, device)
+        warm_up(
+            model,
+            input_ids,
+            args.warmup_steps,
+            device,
+            compute_dtype,
+            args.mode,
+        )
         local_times = time_forward_passes(
             model,
             input_ids,
             args.measurement_steps,
             device,
+            compute_dtype,
+            args.mode,
         )
         timing = gather_timing_results(local_times, device, rank)
 
         profile_peak_allocated = profile_peak_reserved = None
         if not args.skip_profile_step:
             profile_peak_allocated, profile_peak_reserved = run_profile_step(
-                model, input_ids, device
+                model,
+                input_ids,
+                device,
+                compute_dtype,
+                args.mode,
             )
 
         if rank == 0:
             assert timing is not None
-            accounting = print_memory_accounting(args)
+            accounting = (
+                print_memory_accounting(args)
+                if args.mode == "fsdp"
+                else None
+            )
             print("\nForward timing (max of the two ranks for each step):")
             print(
                 f"  mean={timing['mean_ms']:.3f} ms, "
@@ -605,7 +642,8 @@ def main() -> None:
                 )
 
             summary = {
-                "model": "xl",
+                "mode": args.mode,
+                "model": args.model_size,
                 "model_config": {
                     **CONFIG,
                     "context_length": args.context_length,
@@ -622,7 +660,7 @@ def main() -> None:
             }
             output_path = (
                 args.output_dir
-                / f"fsdp_xl_{args.compute_dtype}_summary.json"
+                / f"{args.mode}_{args.model_size}_{args.compute_dtype}_summary.json"
             )
             output_path.write_text(json.dumps(summary, indent=2))
             print(f"Summary: {output_path}")

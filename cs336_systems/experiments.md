@@ -800,3 +800,21 @@ Compiled Attention 结果：
 根据第 6 节的测量结果，两卡 FSDP 会在优化器状态分片的基础上，进一步将模型参数和梯度各分摊到两张 GPU，因此每张 GPU 预计还能节省约 12,995.9 MiB 显存。忽略 all-gather 临时缓冲区后，峰值显存预计从 52,430.3 MiB 降至约 28,122.8 MiB，也就是节省约 24,307.5 MiB（23.74 GiB），降幅约 46.36%。
 
 在两张 RTX 4090 上，XL 模型采用全局 batch size 4、context length 512 和 FP16 权重通信时，单次前向传播平均耗时为 1170.83 ms，标准差为 30.29 ms，中位数为 1173.14 ms。 从 Nsight 时间线可以观察每层的 NCCL all-gather 是否在对应层的 FSDP_ACQUIRE 和首个 GEMM 开始前完成；
+
+观察nsys的时间线可以看出，确实有一部分通信隐藏在计算之下；但是同样也看到了，有AllGather明显延伸到了计算kernel 结束之后，因此在这个区间里，通信没有被完全隐藏：
+![alt text](image-5.png)
+
+![alt text](image-6.png)
+
+在两张 RTX 4090 上，为了与未分片模型进行直接对比，我使用 Large 模型、全局 batch size 4、context length 512 和 FP16 计算进行测试。普通完整模型的平均前向时间为 65.96 ms，而 FSDP 的平均前向时间为 351.03 ms，增加约 285.08 ms，即慢约 432.2%（5.32 倍）。可以认为通信没有被充分隐藏，并显著延长了 forward 的关键路径。
+
+可能的原因：
+1. 4090没有nvlink，通信只能走pcie，带宽不够，通信太慢
+2. 每一个linear module都进行了all-gather，all-gather的开销叠加起来就很大
+3. 预取策略的问题，提前两次预取还不够
+
+
+## 8 Analyzing Parallelism Strategies
+
+都是些理论分析，不想做了，以后要用上分布式计算再说吧
+
